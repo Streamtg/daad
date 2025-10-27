@@ -107,6 +107,7 @@ func (b *TelegramBot) registerHandlers() {
 	clientDispatcher.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 }
 
+// handleStartCommand envía el mensaje de bienvenida **sin botones** y **sin enlace**
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	chatID := u.EffectiveChat().GetID()
 	user := u.EffectiveUser()
@@ -166,30 +167,30 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 		b.logger.Printf("User %d already exists in DB with isAuthorized=%t, isAdmin=%t", user.ID, isAuthorized, isAdmin)
 	}
 
-	webURL := fmt.Sprintf("%s/%d", b.config.BaseURL, chatID)
+	// Mensaje de bienvenida **exacto** como lo pediste
 	startMsg := fmt.Sprintf(
-		"Hello %s, I am @%s, your bridge between Telegram and the Web!\n\n"+
+		"Hello Streammgram, I am @Mediaprocesor_bot, your bridge between Telegram and the Web!\n\n"+
 			"You can **forward** or **directly upload** media files (audio, video, photos, or documents) to this bot.\n"+
 			"I will instantly generate a streaming link and play it on your web player.\n\n"+
 			"**Features:**\n"+
 			"• Forward media from any chat\n"+
 			"• Upload media directly (including video files as documents)\n"+
-			"• Instant web streaming\n"+
-			"• Control playback from Telegram\n\n"+
-			"Click 'Open Web URL' below or access your player here: %s",
-		user.FirstName, ctx.Self.Username, webURL,
+			"• Instant web streaming",
 	)
-	err = b.sendMediaURLReply(ctx, u, startMsg, webURL)
+
+	// Enviamos **sin botones** y **sin enlace**
+	err = b.sendReply(ctx, u, startMsg)
 	if err != nil {
 		b.logger.Printf("Failed to send start message to user %d: %v", user.ID, err)
 		return fmt.Errorf("failed to send start message: %w", err)
 	}
 
 	if !isAuthorized {
-		b.logger.Printf("DEBUG: User %d is NOT authorized (isAuthorized=%t). Sending unauthorized message for media.", user.ID, isAuthorized)
+		b.logger.Printf("DEBUG: User %d is NOT authorized (isAuthorized=%t). Sending unauthorized message.", user.ID, isAuthorized)
 		authorizationMsg := "You are not authorized to use this bot yet. Please ask one of the administrators to authorize you and wait until you receive a confirmation."
 		return b.sendReply(ctx, u, authorizationMsg)
 	}
+
 	b.logger.Printf("DEBUG: User %d is authorized. /start command completed successfully.", user.ID)
 	return nil
 }
@@ -261,7 +262,7 @@ func (b *TelegramBot) handleAuthorizeUser(ctx *ext.Context, u *ext.Update) error
 	}
 	targetUserID, err := strconv.ParseInt(args[1], 10, 64)
 	if err != nil {
-		return b.sendReply(ctx, u, "Invalid user ID.") // CORREGIDO: Speechreturn → return
+		return b.sendReply(ctx, u, "Invalid user ID.")
 	}
 
 	isAdmin := len(args) > 2 && args[2] == "admin"
@@ -582,13 +583,9 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 	return err
 }
 
-// /start: sin botones
+// sendMediaURLReply ya no se usa (se reemplazó por sendReply en /start)
 func (b *TelegramBot) sendMediaURLReply(ctx *ext.Context, u *ext.Update, msg, webURL string) error {
-	_, err := ctx.Reply(u, ext.ReplyTextString(msg), &ext.ReplyOpts{})
-	if err != nil {
-		b.logger.Printf("Failed to send reply to user: %s (ID: %d) - Error: %v", u.EffectiveUser().FirstName, u.EffectiveUser().ID, err)
-	}
-	return err
+	return b.sendReply(ctx, u, msg)
 }
 
 // Respuesta a medios: solo botón STREAMING
