@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/data"
@@ -92,7 +91,7 @@ func (b *TelegramBot) registerHandlers() {
 	d := b.tgClient.Dispatcher
 	d.AddHandler(handlers.NewCommand("start", b.handleStartCommand))
 	d.AddHandler(handlers.NewCommand("authorize", b.handleAuthorizeUser))
-	d.AddHandler(handlers.NewCommand("deauthorize", b.handleDeauthorizeUser)) // CORREGIDO
+	d.AddHandler(handlers.NewCommand("deauthorize", b.handleDeauthorizeUser))
 	d.AddHandler(handlers.NewCommand("listusers", b.handleListUsers))
 	d.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
@@ -107,7 +106,7 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 		return nil
 	}
 
-	existingUser, err := b.userRepository.GetUserInfo(user.ID)
+	existingUser, _ := b.userRepository.GetUserInfo(user.ID)
 	isFirstUser, _ := b.userRepository.IsFirstUser()
 
 	isAdmin := false
@@ -118,9 +117,7 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 			isAuthorized = true
 			isAdmin = true
 		}
-		if err := b.userRepository.StoreUserInfo(user.ID, chatID, user.FirstName, user.LastName, user.Username, isAuthorized, isAdmin); err != nil {
-			return err
-		}
+		_ = b.userRepository.StoreUserInfo(user.ID, chatID, user.FirstName, user.LastName, user.Username, isAuthorized, isAdmin)
 		if !isAdmin {
 			go b.notifyAdminsAboutNewUser(user, chatID)
 		}
@@ -207,14 +204,13 @@ func (b *TelegramBot) handleAnyUpdate(*ext.Context, *ext.Update) error { return 
 
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	chatID := u.EffectiveChat().GetID()
-	user := u.EffectiveUser()
 
 	if !b.isUserChat(ctx, chatID) {
 		return dispatcher.EndGroups
 	}
 
-	userInfo, err := b.userRepository.GetUserInfo(chatID)
-	if err != nil || !userInfo.IsAuthorized {
+	userInfo, _ := b.userRepository.GetUserInfo(chatID)
+	if userInfo == nil || !userInfo.IsAuthorized {
 		return b.sendReply(ctx, u, "Not authorized. Ask an admin.")
 	}
 
@@ -367,8 +363,8 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 		return b.sendReply(ctx, u, "Usage: /userinfo <id>")
 	}
 	id, _ := strconv.ParseInt(args[1], 10, 64)
-	user, err := b.userRepository.GetUserInfo(id)
-	if err != nil {
+	user, _ := b.userRepository.GetUserInfo(id)
+	if user == nil {
 		return b.sendReply(ctx, u, "User not found.")
 	}
 	return b.sendReply(ctx, u, fmt.Sprintf("ID: %d\nName: %s %s\n@%s\nAuth: %t\nAdmin: %t", user.UserID, user.FirstName, user.LastName, user.Username, user.IsAuthorized, user.IsAdmin))
