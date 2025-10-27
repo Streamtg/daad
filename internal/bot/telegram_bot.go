@@ -103,7 +103,6 @@ func (b *TelegramBot) registerHandlers() {
 	clientDispatcher.AddHandler(handlers.NewCommand("deauthorize", b.handleDeauthorizeUser))
 	clientDispatcher.AddHandler(handlers.NewCommand("listusers", b.handleListUsers))
 	clientDispatcher.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
-	// Eliminado: handleCallbackQuery
 	clientDispatcher.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 	clientDispatcher.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 }
@@ -262,7 +261,7 @@ func (b *TelegramBot) handleAuthorizeUser(ctx *ext.Context, u *ext.Update) error
 	}
 	targetUserID, err := strconv.ParseInt(args[1], 10, 64)
 	if err != nil {
-	 Speechreturn b.sendReply(ctx, u, "Invalid user ID.")
+		return b.sendReply(ctx, u, "Invalid user ID.") // CORREGIDO: Speechreturn → return
 	}
 
 	isAdmin := len(args) > 2 && args[2] == "admin"
