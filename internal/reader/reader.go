@@ -274,19 +274,35 @@ func (r *telegramReader) downloadAndCacheChunk(req *tg.UploadGetFileRequest, cac
 				if isTimeout {
 					r.consecutiveTimeouts++
 
-					// Reduce chunk size after 3 consecutive timeouts
+					// Reduce chunk size more progressively: 25% reduction instead of 50%
+					// This provides better granularity and faster recovery
 					if r.consecutiveTimeouts >= 3 && r.requestLimit > 65536 { // 64KB minimum
 						oldLimit := r.requestLimit
-						r.requestLimit = r.requestLimit / 2
-						if r.requestLimit < 65536 {
-							r.requestLimit = 65536
+						// Reduce by 25% (multiply by 0.75) and round down to nearest 4KB boundary
+						newLimit := (r.requestLimit * 3 / 4)
+						// Ensure it's aligned to 4KB boundary and not below minimum
+						newLimit = (newLimit / 4096) * 4096
+						if newLimit < 65536 {
+							newLimit = 65536
 						}
+						r.requestLimit = newLimit
 						r.log.Printf("Reducing chunk size from %d to %d bytes after %d consecutive timeouts",
 							oldLimit, r.requestLimit, r.consecutiveTimeouts)
 						// Update the request limit for this attempt
 						actualLimit := minInt64(r.requestLimit, int64(req.Limit))
 						req.Limit = int(actualLimit)
 					}
+					
+					// Use slightly more aggressive backoff for timeouts (but cap at reasonable max)
+					timeoutDelay := delay
+					if retryCount >= 3 {
+						// For timeouts after 3 attempts, use longer delays but cap at 30s instead of 60s
+						timeoutDelay = minDuration(delay*2, 30*time.Second)
+					}
+					r.log.Printf("Transient timeout error: %v, retrying in %v (attempt %d/%d)", err, timeoutDelay, retryCount+1, r.maxRetries)
+					time.Sleep(timeoutDelay)
+					delay = minDuration(delay*2, r.maxDelay)
+					continue
 				}
 
 				r.log.Printf("Transient error: %v, retrying in %v (attempt %d/%d)", err, delay, retryCount+1, r.maxRetries)
@@ -318,12 +334,27 @@ func (r *telegramReader) downloadAndCacheChunk(req *tg.UploadGetFileRequest, cac
 			r.consecutiveTimeouts = 0
 			r.successfulChunks++
 
-			// Restore chunk size after 5 successful downloads
-			if r.successfulChunks >= 5 && r.requestLimit < preferredChunkSize {
-				r.log.Printf("Restored chunk size from %d to %d bytes after %d successful downloads",
-					r.requestLimit, preferredChunkSize, r.successfulChunks)
-				r.requestLimit = preferredChunkSize
-				r.successfulChunks = 0
+			// Restore chunk size more aggressively: after 3 successful downloads (reduced from 5)
+			// This provides faster recovery when network conditions improve
+			if r.successfulChunks >= 3 && r.requestLimit < preferredChunkSize {
+				// Restore progressively: increase by 50% each time until we reach preferred size
+				oldLimit := r.requestLimit
+				if r.requestLimit < preferredChunkSize {
+					newLimit := r.requestLimit * 3 / 2
+					// Round to nearest 4KB boundary and cap at preferred size
+					newLimit = (newLimit / 4096) * 4096
+					if newLimit > preferredChunkSize {
+						newLimit = preferredChunkSize
+					}
+					r.requestLimit = newLimit
+					r.successfulChunks = 0 // Reset counter for next restoration step
+					if r.requestLimit == preferredChunkSize {
+						r.log.Printf("Fully restored chunk size to %d bytes after recovery", preferredChunkSize)
+					} else {
+						r.log.Printf("Partially restored chunk size from %d to %d bytes (continuing recovery)",
+							oldLimit, r.requestLimit)
+					}
+				}
 			}
 
 			// Log successful retry if this wasn't the first attempt

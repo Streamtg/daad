@@ -56,13 +56,25 @@ func NewServer(
 func (s *Server) Start() {
 	router := mux.NewRouter()
 
-	// Register routes
+	// Register specific routes first (before wildcards) to handle standard HTTP paths
+	router.HandleFunc("/favicon.ico", s.handleFavicon)
+	router.HandleFunc("/robots.txt", s.handleRobots)
+	router.HandleFunc("/sitemap.xml", s.handleSitemap)
+	router.HandleFunc("/metrics", s.handleMetrics)
+	router.HandleFunc("/login", s.handleLogin)
+	router.HandleFunc("/.well-known/{path:.*}", s.handleWellKnown)
+	
+	// Register API and service routes
 	router.HandleFunc("/ws/{chatID}", s.handleWebSocket)
 	router.HandleFunc("/avatar/{chatID}", s.handleAvatar)
 	router.HandleFunc("/api/validate-user/{chatID}", s.handleValidateUser)
 	router.HandleFunc("/api/connection-stats/{chatID}", s.handleConnectionStats)
 	router.HandleFunc("/proxy", s.handleProxy)
+	
+	// Register wildcard routes last (order matters - mux matches first route that matches)
+	// Note: handleStream will validate that messageID is numeric and return 404 if not
 	router.HandleFunc("/{messageID}/{hash}", s.handleStream)
+	
 	router.HandleFunc("/{chatID}", s.handlePlayer)
 	router.HandleFunc("/{chatID}/", s.handlePlayer)
 

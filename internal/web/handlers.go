@@ -19,12 +19,34 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+// isNumeric checks if a string contains only digits
+func isNumeric(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // handleStream handles the file streaming from Telegram
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	vars := mux.Vars(r)
 	messageIDStr := vars["messageID"]
 	authHash := vars["hash"]
+
+	// Early validation: reject non-numeric message IDs immediately
+	if !isNumeric(messageIDStr) {
+		if s.config.DebugMode {
+			s.logger.Debugf("Rejected non-numeric message ID: %s from %s", messageIDStr, r.RemoteAddr)
+		}
+		http.NotFound(w, r)
+		return
+	}
 
 	s.logger.Printf("Received request to stream file with message ID: %s from client %s", messageIDStr, r.RemoteAddr)
 
@@ -34,10 +56,15 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse and validate message ID
+	// Note: isNumeric check above already validated, but we still need to parse
 	messageID, err := strconv.Atoi(messageIDStr)
 	if err != nil {
-		s.logger.Printf("Invalid message ID '%s' received from client %s", messageIDStr, r.RemoteAddr)
-		http.Error(w, "Invalid message ID format", http.StatusBadRequest)
+		// This should rarely happen since isNumeric check above should catch it
+		// But keeping as safety check
+		if s.config.DebugMode {
+			s.logger.Debugf("Failed to parse message ID '%s' after numeric validation: %v", messageIDStr, err)
+		}
+		http.NotFound(w, r)
 		return
 	}
 
@@ -651,4 +678,54 @@ func isClientDisconnectError(err error) bool {
 	}
 
 	return false
+}
+
+// handleFavicon handles favicon requests
+func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	// Return 204 No Content to prevent browser from retrying
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRobots handles robots.txt requests
+func (s *Server) handleRobots(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("User-agent: *\nDisallow: /\n"))
+}
+
+// handleSitemap handles sitemap.xml requests
+func (s *Server) handleSitemap(w http.ResponseWriter, r *http.Request) {
+	// Return empty sitemap or 404
+	w.WriteHeader(http.StatusNotFound)
+}
+
+// handleWellKnown handles .well-known paths (security.txt, etc.)
+func (s *Server) handleWellKnown(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	path := vars["path"]
+	
+	// Handle security.txt
+	if path == "security.txt" {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("# Security Policy\n# Contact the bot administrator for security issues.\n"))
+		return
+	}
+	
+	// For other .well-known paths, return 404
+	w.WriteHeader(http.StatusNotFound)
+}
+
+// handleMetrics handles /metrics requests (Prometheus-style)
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	// Return 404 - this is not a metrics endpoint
+	w.WriteHeader(http.StatusNotFound)
+}
+
+// handleLogin handles /login requests
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// Return 401 Unauthorized with message
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusUnauthorized)
+	w.Write([]byte("Unauthorized. Please use the Telegram bot to authenticate.\n"))
 }
