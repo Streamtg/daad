@@ -90,8 +90,6 @@ func (b *TelegramBot) registerHandlers() {
 	d := b.tgClient.Dispatcher
 
 	d.AddHandler(handlers.NewCommand("start", b.handleStartCommand))
-
-	// Admin-only commands
 	d.AddHandler(handlers.NewCommand("ban", b.handleBanUser))
 	d.AddHandler(handlers.NewCommand("unban", b.handleUnbanUser))
 	d.AddHandler(handlers.NewCommand("listusers", b.handleListUsers))
@@ -101,9 +99,7 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 }
 
-// ========================
 // /start – Auto-authorize + English welcome
-// ========================
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -147,9 +143,7 @@ Just send me a file — magic happens instantly!`
 	return b.sendReply(ctx, u, welcome)
 }
 
-// ========================
 // /ban – Admin only
-// ========================
 func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	adminID := u.EffectiveUser().ID
 	adminInfo, err := b.userRepository.GetUserInfo(adminID)
@@ -188,7 +182,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 			peer := b.tgCtx.PeerStorage.GetInputPeerById(info.ChatID)
 			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
 				Peer:    peer,
-				Message: fmt.Sprintf("You have been permanently banned from using this bot.\n\nReason: %s\n\nIf you believe this is a mistake, contact the administrator @Wavetouch_bot.", reason),
+				Message: fmt.Sprintf("You have been permanently banned from using this bot.\n\nReason: %s\n\nIf you believe this is a mistake, contact the administrator.", reason),
 			})
 		}
 	}()
@@ -196,9 +190,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nReason: %s", targetID, reason))
 }
 
-// ========================
 // /unban – Admin only
-// ========================
 func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	adminID := u.EffectiveUser().ID
 	adminInfo, err := b.userRepository.GetUserInfo(adminID)
@@ -237,9 +229,7 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been unbanned.", targetID))
 }
 
-// ========================
 // Media handling
-// ========================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	userID := user.ID
@@ -277,9 +267,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 	return b.sendMediaToUser(ctx, u, fileURL, file, false)
 }
 
-// ========================
-// Admin commands: listusers & userinfo
-// ========================
+// Admin: /listusers
 func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	adminID := u.EffectiveUser().ID
 	info, err := b.userRepository.GetUserInfo(adminID)
@@ -311,13 +299,16 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 		if !usr.IsAuthorized {
 			status = "Banned"
 		}
-		admin := usr.IsAdmin ? " (Admin)" : ""
+		adminTag := ""
+		if usr.IsAdmin {
+			adminTag = " (Admin)"
+		}
 		uname := usr.Username
 		if uname == "" {
 			uname = "N/A"
 		}
 		msg.WriteString(fmt.Sprintf("%d. ID: `%d` – %s %s (@%s) – %s%s\n",
-			offset+i+1, usr.UserID, usr.FirstName, usr.LastName, uname, status, admin))
+			offset+i+1, usr.UserID, usr.FirstName, usr.LastName, uname, status, adminTag))
 	}
 	totalPages := (total + pageSize - 1) / pageSize
 	msg.WriteString(fmt.Sprintf("\nPage %d of %d (%d total users)", page, totalPages, total))
@@ -325,6 +316,7 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	return b.sendReply(ctx, u, msg.String())
 }
 
+// Admin: /userinfo
 func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	adminID := u.EffectiveUser().ID
 	info, err := b.userRepository.GetUserInfo(adminID)
@@ -347,7 +339,10 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	if !target.IsAuthorized {
 		status = "Banned"
 	}
-	adminStatus := target.IsAdmin ? "Yes" : "No"
+	adminStatus := "No"
+	if target.IsAdmin {
+		adminStatus = "Yes"
+	}
 	uname := target.Username
 	if uname == "" {
 		uname = "N/A"
@@ -367,12 +362,12 @@ Joined: %s`,
 	return b.sendReply(ctx, u, msg)
 }
 
-// ========================
-// Helper functions
-// ========================
-func (b *TelegramBot) forwardToLogChannel(ctx *ext.Context, u *ext.Update) { /* ... same as before ... */ }
+// Helper functions (unchanged)
+func (b *TelegramBot) forwardToLogChannel(ctx *ext.Context, u *ext.Update) {
+	// Keep your existing log channel code here
+}
 
-func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, isForwarded bool) error {
+func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
 	keyboard := []tg.KeyboardButtonRow{
 		{Buttons: []tg.KeyboardButtonClass{&tg.KeyboardButtonURL{Text: "STREAMING", URL: fileURL}}},
 	}
@@ -425,7 +420,7 @@ func (b *TelegramBot) wrapWithProxyIfNeeded(fileURL string) string {
 
 func (b *TelegramBot) handleAnyUpdate(ctx *ext.Context, u *ext.Update) error {
 	if b.config.DebugMode {
-		// debug logs
+		// Your debug logs
 	}
 	return nil
 }
