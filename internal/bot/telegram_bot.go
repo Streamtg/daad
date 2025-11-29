@@ -33,6 +33,8 @@ type TelegramBot struct {
 	webServer      *web.Server
 }
 
+const permanentAdminID int64 = 8030036884 // TU ID — ADMIN ÚNICO Y PERMANENTE
+
 func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", config.DatabasePath)
 
@@ -100,13 +102,7 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 		return nil
 	}
 
-	// ADMINISTRADOR FIJO — TÚ
-	const permanentAdminID int64 = 8030036884
-
-	// Todos los usuarios se autorizan automáticamente
 	isAuthorized := true
-
-	// Solo tú eres admin, sin importar el orden de llegada
 	isAdmin := (user.ID == permanentAdminID)
 
 	err := b.userRepository.StoreUserInfo(
@@ -137,14 +133,14 @@ How to use me:
 • Stream directly in browser from any device
 • Access your files anywhere, anytime
 
-Just send me a file — magic happens instantly!. support @Wavetouch_bot`
+Just send me a file — magic happens instantly! support @Wavetouch_bot`
 
 	return b.sendReply(ctx, u, welcome)
 }
 
 // ==================== /ban ====================
 func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != 8030036884 {
+	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
 	}
 
@@ -157,7 +153,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if err != nil || targetID <= 0 {
 		return b.sendReply(ctx, u, "Invalid user ID.")
 	}
-	if targetID == 8030036884 {
+	if targetID == permanentAdminID {
 		return b.sendReply(ctx, u, "You cannot ban the main administrator.")
 	}
 
@@ -170,7 +166,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 		return b.sendReply(ctx, u, "Failed to ban user.")
 	}
 
-	b.logger.Printf("ADMIN 8030036884 banned user %d – Reason: %s", targetID, reason)
+	b.logger.Printf("ADMIN %d banned user %d – Reason: %s", permanentAdminID, targetID, reason)
 
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
@@ -178,17 +174,17 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 			peer := b.tgCtx.PeerStorage.GetInputPeerById(info.ChatID)
 			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
 				Peer:    peer,
-				Message: fmt.Sprintf("You have been permanently banned from using this bot. support @Wavetouch_bot.\n\nReason: %s", reason),
+				Message: fmt.Sprintf("You have been permanently banned from using this bot.support @Wavetouch_bot.\n\nReason: %s", reason),
 			})
 		}
 	}()
 
-	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nReason: %s", targetID, reason))
+	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.support @Wavetouch_bot\nReason: %s", targetID, reason))
 }
 
 // ==================== /unban ====================
 func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != 8030036884 {
+	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
 	}
 
@@ -206,7 +202,7 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 		return b.sendReply(ctx, u, "Failed to unban user.")
 	}
 
-	b.logger.Printf("ADMIN 8030036884 unbanned user %d", targetID)
+	b.logger.Printf("ADMIN %d unbanned user %d", permanentAdminID, targetID)
 
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
@@ -219,10 +215,103 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 		}
 	}()
 
-	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been unbanned. support @Wavetouch_bot.", targetID))
+	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been unbanned.", targetID))
 }
 
-// ==================== Media & Otros comandos (sin cambios) ====================
+// ==================== /listusers ====================
+func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
+	if u.EffectiveUser().ID != permanentAdminID {
+		return b.sendReply(ctx, u, "Only the administrator can use this command.")
+	}
+
+	const pageSize = 10
+	page := 1
+	args := strings.Fields(u.EffectiveMessage.Text)
+	if len(args) > 1 {
+		if p, err := strconv.Atoi(args[1]); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	total, _ := b.userRepository.GetUserCount()
+	if total == 0 {
+		return b.sendReply(ctx, u, "No users registered yet.")
+	}
+
+	offset := (page - 1) * pageSize
+	users, _ := b.userRepository.GetAllUsers(offset, pageSize)
+	if len(users) == 0 {
+		return b.sendReply(ctx, u, "No users on this page.")
+	}
+
+	var msg strings.Builder
+	msg.WriteString("*User List*\n\n")
+	for i, usr := range users {
+		status := "Authorized"
+		if !usr.IsAuthorized {
+			status = "Banned"
+		}
+		adminTag := usr.IsAdmin ? " (Admin)" : ""
+		username := usr.Username
+		if username == "" {
+			username = "N/A"
+		}
+		msg.WriteString(fmt.Sprintf("%d. `%d` – %s %s (@%s) – %s%s\n",
+			offset+i+1, usr.UserID, usr.FirstName, usr.LastName, username, status, adminTag))
+	}
+	totalPages := (total + pageSize - 1) / pageSize
+	msg.WriteString(fmt.Sprintf("\nPage %d of %d (%d total users)", page, totalPages, total))
+
+	return b.sendReply(ctx, u, msg.String())
+}
+
+// ==================== /userinfo ====================
+func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
+	if u.EffectiveUser().ID != permanentAdminID {
+		return b.sendReply(ctx, u, "Only the administrator can use this command.")
+	}
+
+	args := strings.Fields(u.EffectiveMessage.Text)
+	if len(args) < 2 {
+		return b.sendReply(ctx, u, "Usage: /userinfo <user_id>")
+	}
+
+	targetID, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil {
+		return b.sendReply(ctx, u, "Invalid user ID.")
+	}
+
+	target, err := b.userRepository.GetUserInfo(targetID)
+	if err != nil || target == nil {
+		return b.sendReply(ctx, u, "User not found.")
+	}
+
+	status := "Authorized"
+	if !target.IsAuthorized {
+		status = "Banned"
+	}
+	adminStatus := "No"
+	if target.IsAdmin {
+		adminStatus = "Yes"
+	}
+	username := target.Username
+	if username == "" {
+		username = "N/A"
+	}
+
+	msg := fmt.Sprintf(`*User Information*
+ID: <code>%d</code>
+Name: %s %s
+Username: @%s
+Status: %s
+Admin: %s
+Joined: %s`,
+		target.UserID, target.FirstName, target.LastName, username, status, adminStatus, target.CreatedAt)
+
+	return b.sendReply(ctx, u, msg)
+}
+
+// ==================== Resto de funciones (sin cambios) ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -250,21 +339,6 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 	return b.sendMediaToUser(ctx, u, fileURL, file, false)
-}
-
-func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != 8030036884 {
-		return b.sendReply(ctx, u, "Only the administrator can use this command.")
-	}
-	// ... (código completo de listusers que ya tenías, lo dejo igual)
-	return b.sendReply(ctx, u, "List users feature coming soon.")
-}
-
-func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != 8030036884 {
-		return b.sendReply(ctx, u, "Only the administrator can use this command.")
-	}
-	return b.sendReply(ctx, u, "User info feature coming soon.")
 }
 
 func (b *TelegramBot) handleAnyUpdate(ctx *ext.Context, u *ext.Update) error { return nil }
