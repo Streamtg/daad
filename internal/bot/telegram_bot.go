@@ -48,6 +48,7 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 			DisableCopyright: true,
 		})
 	if err != nil {
+	{
 		return nil, fmt.Errorf("failed to initialize Telegram client: %w", err)
 	}
 
@@ -133,7 +134,8 @@ How to use me:
 • Stream directly in browser from any device
 • Access your files anywhere, anytime
 
-Just send me a file — magic happens instantly! support @Wavetouch_bot`
+Just send me a file — magic happens instantly! 
+Support: @Wavetouch_bot`
 
 	return b.sendReply(ctx, u, welcome)
 }
@@ -141,20 +143,24 @@ Just send me a file — magic happens instantly! support @Wavetouch_bot`
 // ==================== /ban ====================
 func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
-		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
+		b.sendReply(ctx, u, "Only the main administrator can use this command.")
+		return
 	}
 
 	args := strings.Fields(u.EffectiveMessage.Text)
 	if len(args) < 2 {
-		return b.sendReply(ctx, u, "Usage: /ban <user_id> [reason]")
+		b.sendReply(ctx, u, "Usage: /ban <user_id> [reason]")
+		return
 	}
 
 	targetID, err := strconv.ParseInt(args[1], 10, 64)
 	if err != nil || targetID <= 0 {
-		return b.sendReply(ctx, u, "Invalid user ID.")
+		b.sendReply(ctx, u, "Invalid user ID.")
+		return
 	}
 	if targetID == permanentAdminID {
-		return b.sendReply(ctx, u, "You cannot ban the main administrator.")
+		b.sendReply(ctx, u, "You cannot ban the main administrator.")
+		return
 	}
 
 	reason := "No reason provided"
@@ -163,7 +169,8 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	if err := b.userRepository.DeauthorizeUser(targetID); err != nil {
-		return b.sendReply(ctx, u, "Failed to ban user.")
+		b.sendReply(ctx, u, "Failed to ban user.")
+		return
 	}
 
 	b.logger.Printf("ADMIN %d banned user %d – Reason: %s", permanentAdminID, targetID, reason)
@@ -174,12 +181,12 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 			peer := b.tgCtx.PeerStorage.GetInputPeerById(info.ChatID)
 			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
 				Peer:    peer,
-				Message: fmt.Sprintf("You have been permanently banned from using this bot.support @Wavetouch_bot.\n\nReason: %s", reason),
+				Message: fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason),
 			})
 		}
 	}()
 
-	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.support @Wavetouch_bot\nReason: %s", targetID, reason))
+	b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nSupport: @Wavetouch_bot\nReason: %s", targetID, reason))
 }
 
 // ==================== /unban ====================
@@ -221,6 +228,7 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 // ==================== /listusers ====================
 func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
+	{
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
 	}
 
@@ -251,7 +259,10 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 		if !usr.IsAuthorized {
 			status = "Banned"
 		}
-		adminTag := usr.IsAdmin ? " (Admin)" : ""
+		adminTag := ""
+		if usr.IsAdmin {
+			adminTag = " (Admin)"
+		}
 		username := usr.Username
 		if username == "" {
 			username = "N/A"
@@ -311,7 +322,7 @@ Joined: %s`,
 	return b.sendReply(ctx, u, msg)
 }
 
-// ==================== Resto de funciones (sin cambios) ====================
+// ==================== Media & resto de funciones ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
