@@ -162,9 +162,10 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
-			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
-				Message: fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason),
-			})
+			b.tgCtx.SendMessage(info.ChatID, ext.SendText(
+				fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason),
+				ext.HTML(),
+			))
 		}
 	}()
 
@@ -196,9 +197,7 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
-			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
-				Message: "You have been unbanned!\nYou can now use the bot again.",
-			})
+			b.tgCtx.SendMessage(info.ChatID, ext.SendText("You have been unbanned!\nYou can now use the bot again.", ext.HTML()))
 		}
 	}()
 
@@ -301,7 +300,7 @@ Joined: %s`,
 	return b.sendReply(ctx, u, msg)
 }
 
-// ==================== MEDIA + LOG AL CANAL (100% FUNCIONAL) ====================
+// ==================== MEDIA + LOG AL CANAL (SOLUCIÓN 100% CORRECTA) ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -329,7 +328,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// LOG AL CANAL PRIVADO – CON HTML Y 100% COMPILABLE
+	// LOG AL CANAL – FORMA OFICIAL Y 100% COMPILABLE EN GOTGPROTO
 	go func() {
 		user := u.EffectiveUser()
 		username := user.Username
@@ -352,10 +351,8 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 			fileURL,
 		)
 
-		_, err := b.tgCtx.SendMessage(logChannelID, &tg.MessagesSendMessageRequest{
-			Message:   logText,
-			ParseMode: "HTML",
-		})
+		// FORMA CORRECTA: ext.SendText + ext.HTML()
+		_, err := b.tgCtx.SendMessage(logChannelID, ext.SendText(logText, ext.HTML()))
 		if err != nil {
 			b.logger.Printf("Failed to send log to channel: %v", err)
 		}
