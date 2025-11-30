@@ -37,7 +37,7 @@ type TelegramBot struct {
 const permanentAdminID int64 = 8030036884
 const logChannelID int64 = -1003213143951 // TU CANAL PRIVADO
 
-func NewTelegramBot(config *config.Configuration, log *logger *logger.Logger) (*TelegramBot, error) {
+func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", config.DatabasePath)
 
 	tgClient, err := gotgproto.NewClient(
@@ -144,11 +144,8 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 		return b.sendReply(ctx, u, "Usage: /ban <user_id> [reason]")
 	}
 	targetID, err := strconv.ParseInt(args[1], 10, 64)
-	if err != nil || targetID <= 0 {
-		return b.sendReply(ctx, u, "Invalid user ID.")
-	}
-	if targetID == permanentAdminID {
-		return b.sendReply(ctx, u, "You cannot ban the main administrator.")
+	if err != nil || targetID <= 0 || targetID == permanentAdminID {
+		return b.sendReply(ctx, u, "Invalid or protected user ID.")
 	}
 	reason := "No reason provided"
 	if len(args) > 2 {
@@ -158,6 +155,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 		return b.sendReply(ctx, u, "Failed to ban user.")
 	}
 	b.logger.Printf("ADMIN %d banned user %d – Reason: %s", permanentAdminID, targetID, reason)
+
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
@@ -169,6 +167,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 			})
 		}
 	}()
+
 	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nReason: %s", targetID, reason))
 }
 
@@ -288,7 +287,7 @@ Joined: %s`,
 	return b.sendReply(ctx, u, msg)
 }
 
-// ==================== MEDIA + LOG AL CANAL (100% FUNCIONAL) ====================
+// ==================== MEDIA + LOG AL CANAL (FUNCIONA 100%) ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -316,7 +315,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// LOG AL CANAL PRIVADO – FUNCIONA 100% SIN ParseMode NI Entities
+	// LOG AL CANAL – SIMPLE, LIMPIO Y 100% FUNCIONAL
 	go func() {
 		user := u.EffectiveUser()
 		username := user.Username
@@ -358,7 +357,6 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 }
 
 // ==================== UTILIDADES ====================
-func formatBytes
 func formatBytes(bytes int64) string {
 	if bytes == 0 {
 		return "0 B"
