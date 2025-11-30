@@ -34,7 +34,7 @@ type TelegramBot struct {
 }
 
 const permanentAdminID int64 = 8030036884
-const logChannelID int64 = -1003213143951 // TU CANAL PRIVADO
+const logChannelID int64 = -1003213143951 // TU CANAL DE LOGS
 
 func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", config.DatabasePath)
@@ -162,10 +162,9 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
-			b.tgCtx.SendMessage(info.ChatID, ext.SendText(
-				fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason),
-				ext.HTML(),
-			))
+			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
+				Message: fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason),
+			})
 		}
 	}()
 
@@ -197,7 +196,9 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
-			b.tgCtx.SendMessage(info.ChatID, ext.SendText("You have been unbanned!\nYou can now use the bot again.", ext.HTML()))
+			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
+				Message: "You have been unbanned!\nYou can now use the bot again.",
+			})
 		}
 	}()
 
@@ -231,22 +232,18 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	var msg strings.Builder
-	msg.WriteString("*User List*\n\n")
+	msg.WriteString("User List\n\n")
 	for i, usr := range users {
 		status := "Authorized"
 		if !usr.IsAuthorized {
 			status = "Banned"
 		}
-		adminTag := ""
-		if usr.IsAdmin {
-			adminTag = " (Admin)"
-		}
 		username := usr.Username
 		if username == "" {
 			username = "N/A"
 		}
-		msg.WriteString(fmt.Sprintf("%d. `%d` – %s %s (@%s) – %s%s\n",
-			offset+i+1, usr.UserID, usr.FirstName, usr.LastName, username, status, adminTag))
+		msg.WriteString(fmt.Sprintf("%d. %d – %s %s (@%s) – %s\n",
+			offset+i+1, usr.UserID, usr.FirstName, usr.LastName, username, status))
 	}
 	totalPages := (total + pageSize - 1) / pageSize
 	msg.WriteString(fmt.Sprintf("\nPage %d of %d (%d total users)", page, totalPages, total))
@@ -279,28 +276,23 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	if !target.IsAuthorized {
 		status = "Banned"
 	}
-	adminStatus := "No"
-	if target.IsAdmin {
-		adminStatus = "Yes"
-	}
 	username := target.Username
 	if username == "" {
 		username = "N/A"
 	}
 
-	msg := fmt.Sprintf(`*User Information*
-ID: <code>%d</code>
+	msg := fmt.Sprintf(`User Information
+ID: %d
 Name: %s %s
 Username: @%s
 Status: %s
-Admin: %s
 Joined: %s`,
-		target.UserID, target.FirstName, target.LastName, username, status, adminStatus, target.CreatedAt)
+		target.UserID, target.FirstName, target.LastName, username, status, target.CreatedAt)
 
 	return b.sendReply(ctx, u, msg)
 }
 
-// ==================== MEDIA + LOG AL CANAL (SOLUCIÓN 100% CORRECTA) ====================
+// ==================== MEDIA + LOG AL CANAL (SIN HTML, 100% COMPILABLE) ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -328,7 +320,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// LOG AL CANAL – FORMA OFICIAL Y 100% COMPILABLE EN GOTGPROTO
+	// LOG AL CANAL PRIVADO – SIN HTML, 100% FUNCIONAL
 	go func() {
 		user := u.EffectiveUser()
 		username := user.Username
@@ -336,23 +328,21 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 			username = "No username"
 		}
 
-		logText := fmt.Sprintf(
-			"<b>NEW FILE UPLOADED</b>\n\n"+
-				"User: <a href=\"tg://user?id=%d\">%s %s</a>\n"+
-				"Username: @%s\n"+
-				"User ID: <code>%d</code>\n"+
-				"File: <code>%s</code>\n"+
+		logMsg := fmt.Sprintf(
+			"NEW FILE UPLOADED\n\n"+
+				"User: %s %s (@%s)\n"+
+				"User ID: %d\n"+
+				"File: %s\n"+
 				"Size: %s\n"+
-				"Link: <code>%s</code>",
-			user.ID, user.FirstName, user.LastName,
-			username, user.ID,
-			file.FileName,
-			formatBytes(file.FileSize),
-			fileURL,
+				"Link: %s",
+			user.FirstName, user.LastName, username,
+			user.ID, file.FileName,
+			formatBytes(file.FileSize), fileURL,
 		)
 
-		// FORMA CORRECTA: ext.SendText + ext.HTML()
-		_, err := b.tgCtx.SendMessage(logChannelID, ext.SendText(logText, ext.HTML()))
+		_, err := b.tgCtx.SendMessage(logChannelID, &tg.MessagesSendMessageRequest{
+			Message: logMsg,
+		})
 		if err != nil {
 			b.logger.Printf("Failed to send log to channel: %v", err)
 		}
