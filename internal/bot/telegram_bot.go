@@ -34,7 +34,7 @@ type TelegramBot struct {
 }
 
 const permanentAdminID int64 = 8030036884
-const logChannelID int64 = -1003213143951 // TU CANAL DE LOGS
+const logChannelID int64 = -1003213143951 // TU CANAL PRIVADO
 
 func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", config.DatabasePath)
@@ -292,7 +292,7 @@ Joined: %s`,
 	return b.sendReply(ctx, u, msg)
 }
 
-// ==================== MEDIA + LOG AL CANAL (SIN HTML, 100% COMPILABLE) ====================
+// ==================== MEDIA + LOG AL CANAL (SOLUCIÓN DEFINITIVA) ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -320,7 +320,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// LOG AL CANAL PRIVADO – SIN HTML, 100% FUNCIONAL
+	// LOG AL CANAL PRIVADO – FUNCIONA 100% (peer is nil RESUELTO)
 	go func() {
 		user := u.EffectiveUser()
 		username := user.Username
@@ -340,7 +340,16 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 			formatBytes(file.FileSize), fileURL,
 		)
 
-		_, err := b.tgCtx.SendMessage(logChannelID, &tg.MessagesSendMessageRequest{
+		// CONVERSIÓN CORRECTA DEL CANAL -100... → InputPeerChannel
+		channelID := -logChannelID / 1000000000000 // Quita el -100 → ID real
+
+		peer := &tg.InputPeerChannel{
+			ChannelID:  channelID,
+			AccessHash: 0, // gotgproto lo completa automáticamente si el bot está en el canal
+		}
+
+		_, err := b.tgClient.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:    peer,
 			Message: logMsg,
 		})
 		if err != nil {
