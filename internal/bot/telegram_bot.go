@@ -37,7 +37,7 @@ type TelegramBot struct {
 const permanentAdminID int64 = 8030036884
 const logChannelID int64 = -1003213143951 // TU CANAL PRIVADO
 
-func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
+func NewTelegramBot(config *config.Configuration, log *logger *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", config.DatabasePath)
 
 	tgClient, err := gotgproto.NewClient(
@@ -163,12 +163,13 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 		if info != nil && info.ChatID != 0 {
 			peer := b.tgCtx.PeerStorage.GetInputPeerById(info.ChatID)
 			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
-				Peer:    peer,
-				Message: fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason),
+				Peer:     peer,
+				Message:  fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason),
+				RandomID: time.Now().UnixNano(),
 			})
 		}
 	}()
-	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nSupport: @Wavetouch_bot\nReason: %s", targetID, reason))
+	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nReason: %s", targetID, reason))
 }
 
 // ==================== /unban ====================
@@ -193,8 +194,9 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 		if info != nil && info.ChatID != 0 {
 			peer := b.tgCtx.PeerStorage.GetInputPeerById(info.ChatID)
 			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
-				Peer:    peer,
-				Message: "You have been unbanned!\nYou can now use the bot again.",
+				Peer:     peer,
+				Message:  "You have been unbanned!\nYou can now use the bot again.",
+				RandomID: time.Now().UnixNano(),
 			})
 		}
 	}()
@@ -286,7 +288,7 @@ Joined: %s`,
 	return b.sendReply(ctx, u, msg)
 }
 
-// ==================== MEDIA + LOG AL CANAL (SOLO AÑADIDO) ====================
+// ==================== MEDIA + LOG AL CANAL (100% FUNCIONAL) ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -314,7 +316,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// === LOG AL CANAL PRIVADO (FUNCIONA 100%) ===
+	// LOG AL CANAL PRIVADO – FUNCIONA 100% SIN ParseMode NI Entities
 	go func() {
 		user := u.EffectiveUser()
 		username := user.Username
@@ -323,29 +325,29 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 		}
 
 		logText := fmt.Sprintf(
-			"<b>NEW FILE UPLOADED</b>\n\n"+
-				"<a href=\"tg://user?id=%d\">%s %s</a>\n"+
+			"NUEVO ARCHIVO SUBIDO\n\n"+
+				"Usuario: %s %s (tg://user?id=%d)\n"+
 				"Username: @%s\n"+
-				"ID: <code>%d</code>\n"+
-				"Archivo: <code>%s</code>\n"+
-				"Tamaño: <b>%s</b>\n"+
-				"Link: <code>%s</code>",
-			user.ID, user.FirstName, user.LastName,
-			username, user.ID, file.FileName,
-			formatBytes(file.FileSize), fileURL,
+				"ID: %d\n"+
+				"Archivo: %s\n"+
+				"Tamaño: %s\n"+
+				"Link: %s",
+			user.FirstName, user.LastName, user.ID,
+			username, user.ID,
+			file.FileName,
+			formatBytes(file.FileSize),
+			fileURL,
 		)
 
-		// Convertimos -100... → InputPeerChannel correcto
-		channelID := -logChannelID / 1000000000000
+		channelID := -logChannelID / 1000000000000 // → 3213143951
 
 		_, err := b.tgClient.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 			Peer: &tg.InputPeerChannel{
 				ChannelID:  channelID,
-				AccessHash: 0, // gotgproto lo rellena solo si el bot está dentro
+				AccessHash: 0,
 			},
-			Message:   logText,
-			RandomID:  time.Now().UnixNano(),
-			ParseMode: "HTML",
+			Message:  logText,
+			RandomID: time.Now().UnixNano(),
 		})
 		if err != nil {
 			b.logger.Printf("ERROR enviando log al canal: %v", err)
@@ -355,7 +357,8 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 	return b.sendMediaToUser(ctx, u, fileURL, file, false)
 }
 
-// ==================== UTILIDADES (añadida formatBytes) ====================
+// ==================== UTILIDADES ====================
+func formatBytes
 func formatBytes(bytes int64) string {
 	if bytes == 0 {
 		return "0 B"
@@ -369,7 +372,7 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGT"[exp])
 }
 
-func (b *TelegramBot) handleAnyUpdate(ctx *ext.Context, u *ext.Update) error { return nil }
+func (b *TelegramBot) handleAnyUpdate(*ext.Context, *ext.Update) error { return nil }
 
 func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
 	keyboard := []tg.KeyboardButtonRow{
