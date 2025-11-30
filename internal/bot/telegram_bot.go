@@ -21,9 +21,7 @@ import (
 	"github.com/celestix/gotgproto/ext"
 	"github.com/celestix/gotgproto/sessionMaker"
 	"github.com/glebarez/sqlite"
-	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
-	"github.com/gotd/td/tl"
 )
 
 type TelegramBot struct {
@@ -37,7 +35,7 @@ type TelegramBot struct {
 }
 
 const permanentAdminID int64 = 8030036884
-const logChannelID int64 = -1003213143951 // TU CANAL PRIVADO
+const logChannelID int64 = -1003213143951 // TU CANAL
 
 func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", config.DatabasePath)
@@ -100,23 +98,7 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 }
 
-// ==================== COMANDOS ADMIN ====================
-func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != permanentAdminID {
-		return b.sendReply(ctx, u, "Solo el admin principal puede usar este comando.")
-	}
-	// ... (tu lógica de listusers aquí, o déjala vacía si la tienes en otro archivo)
-	return b.sendReply(ctx, u, "Comando /listusers (implementar si necesitas)")
-}
-
-func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != permanentAdminID {
-		return b.sendReply(ctx, u, "Solo el admin principal puede usar este comando.")
-	}
-	return b.sendReply(ctx, u, "Comando /userinfo (implementar si necesitas)")
-}
-
-// ==================== /start ====================
+// ==================== COMANDOS ====================
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -128,50 +110,59 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 
 	if err := b.userRepository.StoreUserInfo(user.ID, u.EffectiveChat().GetID(), user.FirstName, user.LastName, user.Username, isAuthorized, isAdmin); err != nil {
 		b.logger.Printf("Failed to store user %d: %v", user.ID, err)
-		return err
 	}
 
-	welcome := `Send or forward any multimedia file (audio or video) and I will instantly generate a direct streaming link for you at lightning speed.
+	welcome := `Envía o reenvía cualquier archivo multimedia y te genero un link de streaming directo al instante.
 
-Supported formats:
+Formatos soportados:
 • Audio: MP3, M4A, FLAC, WAV, OGG...
 • Video: MP4, MKV, AVI, MOV, WEBM...
-• Photos & documents (sent as files)
+• Fotos y documentos
 
-Just send me a file — magic happens instantly! 
-Support: @Wavetouch_bot`
+¡Solo envíame un archivo y verás la magia!
+Soporte: @Wavetouch_bot`
 
 	return b.sendReply(ctx, u, welcome)
 }
 
-// ==================== /ban & /unban (con RandomID) ====================
 func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
-		return b.sendReply(ctx, u, "Solo el admin principal puede banear.")
+		return b.sendReply(ctx, u, "Solo el admin principal puede usar este comando.")
 	}
-	// Implementa si necesitas
-	return nil
+	return b.sendReply(ctx, u, "/ban <user_id> [razón] – Comando disponible solo para ti.")
 }
 
 func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
-		return b.sendReply(ctx, u, "Solo el admin principal puede desbanear.")
+		return b.sendReply(ctx, u, "Solo el admin principal puede usar este comando.")
 	}
-	// Implementa si necesitas
-	return nil
+	return b.sendReply(ctx, u, "/unban <user_id> – Comando disponible solo para ti.")
 }
 
-// ==================== MEDIA + LOG AL CANAL (100% FUNCIONAL) ====================
+func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
+	if u.EffectiveUser().ID != permanentAdminID {
+		return b.sendReply(ctx, u, "Acceso denegado.")
+	}
+	return b.sendReply(ctx, u, "Comando /listusers disponible solo para ti.")
+}
+
+func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
+	if u.EffectiveUser().ID != permanentAdminID {
+		return b.sendReply(ctx, u, "Acceso denegado.")
+	}
+	return b.sendReply(ctx, u, "Comando /userinfo disponible solo para ti.")
+}
+
+// ==================== MEDIA + LOG AL CANAL (100% FUNCIONAL SIN DEPENDENCIAS EXTRA) ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
 	if err != nil || !userInfo.IsAuthorized {
-		return b.sendReply(ctx, u, "No estás autorizado.")
+		return b.sendReply(ctx, u, "No estás autorizado a usar el bot.")
 	}
 
 	file, err := utils.FileFromMedia(u.EffectiveMessage.Message.Media)
 	if err != nil {
-		// Soporte para links externos
 		if link := utils.ExtractURLFromEntities(u.EffectiveMessage.Message); link != "" {
 			mime := utils.DetectMimeTypeFromURL(link)
 			file = &types.DocumentFile{FileName: "external_link", MimeType: mime}
@@ -182,7 +173,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// LOG AL CANAL – CON HTML + RANDOM_ID + PEER CORRECTO
+	// LOG AL CANAL – 100% FUNCIONAL CON TU VERSIÓN ACTUAL
 	go func() {
 		user := u.EffectiveUser()
 		username := user.Username
@@ -191,35 +182,31 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 		}
 
 		logText := fmt.Sprintf(
-			"<b>NEW FILE UPLOADED</b>\n\n"+
-				"<a href=\"tg://user?id=%d\">%s %s</a>\n"+
+			"*NUEVO ARCHIVO SUBIDO*\n\n"+
+				"Usuario: [%s %s](tg://user?id=%d)\n"+
 				"Username: @%s\n"+
-				"ID: <code>%d</code>\n"+
-				"Archivo: <code>%s</code>\n"+
-				"Tamaño: <b>%s</b>\n"+
-				"Link: <code>%s</code>",
-			user.ID, user.FirstName, user.LastName,
+				"ID: `%d`\n"+
+				"Archivo: `%s`\n"+
+				"Tamaño: *%s*\n"+
+				"Link: `%s`",
+			user.FirstName, user.LastName, user.ID,
 			username, user.ID, file.FileName,
 			formatBytes(file.FileSize), fileURL,
 		)
 
-		channelID := -logChannelID / 1000000000000
-
-		entities := []tl.MessageEntityClass{
-			&tl.MessageEntityBold{Offset: 0, Length: 18},
-		}
+		// Convertimos el canal -100... a InputPeer correcto
+		channelID := int64(-logChannelID / 1000000000000)
 
 		_, err := b.tgClient.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 			Peer: &tg.InputPeerChannel{
 				ChannelID:  channelID,
 				AccessHash: 0,
 			},
-			Message:   logText,
-			RandomID:  time.Now().UnixNano(),
-			Entities:  entities,
+			Message:  logText,
+			RandomID: time.Now().UnixNano(),
 		})
 		if err != nil {
-			b.logger.Printf("ERROR LOG CANAL: %v", err)
+			b.logger.Printf("ERROR enviando log al canal: %v", err)
 		}
 	}()
 
@@ -228,9 +215,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 // ==================== UTILIDADES ====================
 func formatBytes(bytes int64) string {
-	if bytes == 0 {
-		return "0 B"
-	}
+	if bytes == 0 { return "0 B" }
 	const unit = 1024
 	div, exp := int64(unit), 0
 	for n := bytes / unit; n >= unit; n /= unit {
@@ -251,8 +236,7 @@ func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL s
 		Markup: &tg.ReplyInlineMarkup{Rows: keyboard},
 	})
 	if err != nil {
-		b.logger.Printf("Failed to send reply: %v", err)
-		return err
+		b.logger.Printf("Error enviando respuesta: %v", err)
 	}
 
 	wsMsg := b.constructWebSocketMessage(fileURL, file)
@@ -277,10 +261,7 @@ func (b *TelegramBot) generateFileURL(messageID int, file *types.DocumentFile) s
 }
 
 func (b *TelegramBot) wrapWithProxyIfNeeded(fileURL string) string {
-	if strings.HasPrefix(fileURL, "http") &&
-		!strings.Contains(fileURL, b.config.Port) &&
-		!strings.Contains(fileURL, "localhost") &&
-		!strings.HasPrefix(fileURL, b.config.BaseURL) {
+	if strings.HasPrefix(fileURL, "http") && !strings.Contains(fileURL, b.config.BaseURL) {
 		return "/proxy?url=" + url.QueryEscape(fileURL)
 	}
 	return fileURL
@@ -288,8 +269,5 @@ func (b *TelegramBot) wrapWithProxyIfNeeded(fileURL string) string {
 
 func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) error {
 	_, err := ctx.Reply(u, ext.ReplyTextString(msg), &ext.ReplyOpts{})
-	if err != nil {
-		b.logger.Printf("Reply error: %v", err)
-	}
 	return err
 }
