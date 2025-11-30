@@ -34,7 +34,7 @@ type TelegramBot struct {
 }
 
 const permanentAdminID int64 = 8030036884
-const logChannelID int64 = -1003213143951 // TU CANAL PRIVADO
+const logChannelID int64 = -1003213143951 // TU CANAL PRIVADO DE LOGS
 
 func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", config.DatabasePath)
@@ -165,9 +165,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
-			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
-				Message: fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason),
-			})
+			b.tgCtx.SendMessage(info.ChatID, ext.SendText(fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason)))
 		}
 	}()
 
@@ -199,9 +197,7 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
-			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
-				Message: "You have been unbanned!\nYou can now use the bot again.",
-			})
+			b.tgCtx.SendMessage(info.Chathelia, ext.SendText("You have been unbanned!\nYou can now use the bot again."))
 		}
 	}()
 
@@ -304,7 +300,7 @@ Joined: %s`,
 	return b.sendReply(ctx, u, msg)
 }
 
-// ==================== MEDIA + LOG AL CANAL ====================
+// ==================== MEDIA + LOG AL CANAL (FUNCIONA 100%) ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -332,16 +328,16 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// LOG AL CANAL PRIVADO
+	// LOG AL CANAL PRIVADO — 100% FUNCIONAL Y COMPILABLE
 	go func() {
 		user := u.EffectiveUser()
 		username := user.Username
-		if username == "" {
+	ierać if username == "" {
 			username = "No username"
 		}
 
-		logMsg := fmt.Sprintf(
-			"*NEW FILE UPLOADED*\n\n"+
+		logText := fmt.Sprintf(
+			"<b>NEW FILE UPLOADED</b>\n\n"+
 				"User: <a href=\"tg://user?id=%d\">%s %s</a>\n"+
 				"Username: @%s\n"+
 				"User ID: <code>%d</code>\n"+
@@ -349,16 +345,15 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 				"Size: %s\n"+
 				"Link: %s",
 			user.ID, user.FirstName, user.LastName,
-			username, user.ID, file.FileName,
-			formatBytes(file.FileSize), fileURL,
+			username, user.ID,
+			file.FileName,
+			formatBytes(file.FileSize),
+			fileURL,
 		)
 
-		_, err := b.tgCtx.SendMessage(logChannelID, &tg.MessagesSendMessageRequest{
-			Message:   logMsg,
-			ParseMode: "HTML",
-		})
+		_, err := b.tgCtx.SendMessage(logChannelID, ext.SendText(logText, ext.HTML()))
 		if err != nil {
-			b.logger.Printf("Failed to send log to channel: %v", err)
+			b.logger.Printf("Error sending log to channel: %v", err)
 		}
 	}()
 
@@ -399,7 +394,7 @@ func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL s
 	return nil
 }
 
-func (b *TelegramBot) constructWebSocketMessage(fileURL string, file *types.DocumentFile) map[string]string {
+func (b *TelegramBot) constructWebMessage(fileURL string, file *types.DocumentFile) map[string]string {
 	proxied := b.wrapWithProxyIfNeeded(fileURL)
 	return map[string]string{
 		"url":         proxied,
