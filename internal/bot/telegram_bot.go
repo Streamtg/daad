@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	permanentAdminID int64 = 8030036884 // TU ID
+	permanentAdminID int64 = 8030036884
 	logChannelMarker      = "DB_USER:"
+	logChannelID     int64 = -1003213143951 // TU CANAL REAL
 )
 
 type UserInfo struct {
@@ -42,6 +43,7 @@ type TelegramBot struct {
 	config    *config.Configuration
 	tgClient  *gotgproto.Client
 	tgCtx     *ext.Context
+	raw       *tg.Client // Para llamadas directas
 	logger    *logger.Logger
 	webServer *web.Server
 
@@ -63,79 +65,80 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 	}
 
 	tgCtx := tgClient.CreateContext()
-	webServer := web.NewServer(config, tgClient, tgCtx, log, nil)
+	raw := tgClient.RawClient() // Cliente raw para llamadas directas
 
 	bot := &TelegramBot{
 		config:    config,
 		tgClient:  tgClient,
 		tgCtx:     tgCtx,
+		raw:       raw,
 		logger:    log,
-		webServer: webServer,
+		webServer: web.NewServer(config, tgClient, tgCtx, log, nil),
 		userCache: make(map[int64]*UserInfo),
 	}
 
-	// Cargar usuarios del canal al iniciar
-	if config.LogChannelID != "" {
-		go bot.loadUsersFromLogChannel()
-	}
+	// Cargar base de datos del canal
+	go bot.loadUsersFromLogChannel()
 
 	return bot, nil
 }
 
 func (b *TelegramBot) Run() {
-	b.logger.Printf("Bot iniciado (@%s) | DB en canal: %s", b.tgClient.Self.Username, b.config.LogChannelID)
+	b.logger.Printf("Bot iniciado (@%s) | DB en canal %d", b.tgClient.Self.Username, logChannelID)
 	b.registerHandlers()
 	go b.webServer.Start()
 	_ = b.tgClient.Idle()
 }
 
-// ==================== CARGA DE USUARIOS DESDE CANAL ====================
+// ==================== CARGA USUARIOS DESDE CANAL ====================
 func (b *TelegramBot) loadUsersFromLogChannel() {
-	time.Sleep(5 * time.Second) // Esperar que el cliente esté listo
+	time.Sleep(8 * time.Second)
 	b.logger.Println("Cargando usuarios desde el canal de logs...")
 
-	channelID, err := strconv.ParseInt(b.config.LogChannelID, 10, 64)
-	if err != nil {
-		b.logger.Printf("LogChannelID inválido: %v", err)
-		return
-	}
-
-	inputPeer := &tg.InputPeerChannel{
-		ChannelID:  channelID,
-		AccessHash: 0, // gotgproto lo resuelve automáticamente
+	peer := tg.InputPeerChannel{
+		ChannelID:  logChannelID,
+		AccessHash: 0, // gotgproto lo resuelve
 	}
 
 	var offsetID int
 	limit := 100
 
 	for {
-		history, err := b.tgCtx.MessagesGetHistory(&tg.MessagesGetHistoryRequest{
-			Peer:     inputPeer,
-			OffsetID: offsetID,
-			Limit:    limit,
+		resp, err := b.raw.MessagesGetMessages(&tg.MessagesGetMessagesRequest{
+			ID: []tg.InputMessageClass{
+				&tg.InputMessageID{ID: offsetID},
+			},
 		})
 		if err != nil {
-			b.logger.Printf("Error leyendo historial del canal: %v", err)
-			break
+			// Intentar con GetHistory
+			history, err2 := b.raw.ChannelsGetMessages(&tg.ChannelsGetMessagesRequest{
+				Channel: &peer,
+				ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: offsetID}},
+			})
+			if err2 != nil {
+				b.logger.Printf("Error cargando mensajes: %v / %v", err, err2)
+				break
+			}
+			resp = history
 		}
 
-		messages := history.(*tg.MessagesChannelMessages).Messages
+		messages := resp.(*tg.MessagesMessagesSlice).Messages
 		if len(messages) == 0 {
 			break
 		}
 
-		for _, msg := range messages {
-			m, ok := msg.(*tg.Message)
-			if !ok || m.Message == "" || !strings.HasPrefix(m.Message, logChannelMarker) {
+		for _, m := range messages {
+			msg, ok := m.(*tg.Message)
+			if !ok || msg.Message == "" || !strings.HasPrefix(msg.Message, logChannelMarker) {
 				continue
 			}
 
-			jsonStr := strings.TrimPrefix(m.Message, logChannelMarker)
+			jsonStr := strings.TrimPrefix(msg.Message, logChannelMarker)
 			var user UserInfo
 			if json.Unmarshal([]byte(jsonStr), &user) == nil {
 				b.userCache[user.UserID] = &user
-				if m.ID > offsetID {
-					offsetID = m.ID
+				if msg.ID > offsetID {
+					offsetID = msg.ID
 				}
 			}
 		}
@@ -145,32 +148,25 @@ func (b *TelegramBot) loadUsersFromLogChannel() {
 		}
 	}
 
-	b.logger.Printf("Base de datos cargada: %d usuarios encontrados", len(b.userCache))
+	b.logger.Printf("Base de datos cargada: %d usuarios", len(b.userCache))
 }
 
-// ==================== GUARDAR USUARIO EN CANAL ====================
+// ==================== GUARDAR EN CANAL ====================
 func (b *TelegramBot) saveUserToLogChannel(user *UserInfo) error {
-	if b.config.LogChannelID == "" {
-		return nil
-	}
-
 	data, _ := json.Marshal(user)
 	msg := logChannelMarker + string(data)
 
-	channelID, _ := strconv.ParseInt(b.config.LogChannelID, 10, 64)
-	peer := &tg.InputPeerChannel{ChannelID: channelID}
-
-	_, err := b.tgCtx.MessagesSendMessage(&tg.MessagesSendMessageRequest{
-		Peer:     peer,
+	_, err := b.raw.MessagesSendMessage(&tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerChannel{ChannelID: logChannelID},
 		Message:  msg,
 		RandomID: rand.Int63(),
 	})
 	return err
 }
 
-// ==================== HELPERS USUARIOS ====================
-func (b *TelegramBot) getUser(userID int64) *UserInfo {
-	if u, ok := b.userCache[userID]; ok {
+// ==================== HELPERS ====================
+func (b *TelegramBot) getUser(id int64) *UserInfo {
+	if u, ok := b.userCache[id]; ok {
 		return u
 	}
 	return nil
@@ -198,7 +194,7 @@ func (b *TelegramBot) registerHandlers() {
 // ==================== /sms ====================
 func (b *TelegramBot) handleSMS(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
-		return b.reply(ctx, u, "Solo el admin principal puede usar /sms")
+		return b.reply(ctx, u, "Solo el admin principal")
 	}
 
 	text := strings.TrimSpace(strings.TrimPrefix(u.EffectiveMessage.Text, "/sms"))
@@ -206,13 +202,12 @@ func (b *TelegramBot) handleSMS(ctx *ext.Context, u *ext.Update) error {
 		return b.reply(ctx, u, "Uso: /sms <mensaje>")
 	}
 
-	users := b.getAllUsers()
 	success := 0
-	for _, user := range users {
+	for _, user := range b.getAllUsers() {
 		if !user.IsAuthorized {
 			continue
 		}
-		_, err := b.tgCtx.SendMessage(user.ChatID, &tg.MessagesSendMessageRequest{
+		_, err := b.raw.MessagesSendMessage(&tg.MessagesSendMessageRequest{
 			Peer:     &tg.InputPeerUser{UserID: user.ChatID},
 			Message:  "Mensaje del admin:\n\n" + text,
 			RandomID: rand.Int63(),
@@ -220,7 +215,7 @@ func (b *TelegramBot) handleSMS(ctx *ext.Context, u *ext.Update) error {
 		if err == nil {
 			success++
 		}
-		time.Sleep(40 * time.Millisecond)
+		time.Sleep(35 * time.Millisecond)
 	}
 
 	return b.reply(ctx, u, fmt.Sprintf("Enviado a %d usuarios", success))
@@ -233,8 +228,7 @@ func (b *TelegramBot) handleStart(ctx *ext.Context, u *ext.Update) error {
 		return nil
 	}
 
-	existing := b.getUser(user.ID)
-	if existing == nil {
+	if b.getUser(user.ID) == nil {
 		newUser := &UserInfo{
 			UserID:       user.ID,
 			ChatID:       u.EffectiveChat().GetID(),
@@ -247,70 +241,66 @@ func (b *TelegramBot) handleStart(ctx *ext.Context, u *ext.Update) error {
 		}
 		b.userCache[user.ID] = newUser
 		_ = b.saveUserToLogChannel(newUser)
-		b.logger.Printf("Nuevo usuario: %d", user.ID)
 	}
 
-	welcome := `Envía cualquier archivo y te doy link de streaming instantáneo
+	return b.reply(ctx, u, `Envía cualquier video o audio
 
-Soporta MKV, MP4, AVI, MOV, WEBM, MP3, FLAC...
-Funciona en iPhone, Android, PC, TV
+Soporta MKV · MP4 · AVI · WEBM · MP3 · FLAC
 
-Sin compresión · Seek perfecto · 4K/8K
+Streaming instantáneo en todos los dispositivos
 
-Solo envía un archivo`
-
-	return b.reply(ctx, u, welcome)
+Solo envía un archivo`)
 }
 
-// ==================== Media + Streaming ====================
+// ==================== Media ====================
 func (b *TelegramBot) handleMedia(ctx *ext.Context, u *ext.Update) error {
-	userID := u.EffectiveUser().ID
-	user := b.getUser(userID)
+	user := b.getUser(u.EffectiveUser().ID)
 	if user == nil {
-		return b.reply(ctx, u, "Usa /start primero")
+		return b.reply(ctx, u, "Usa /start")
 	}
-	if !user.IsAuthorized && userID != permanentAdminID {
-		return b.reply(ctx, u, "No estás autorizado")
+	if !user.IsAuthorized && u.EffectiveUser().ID != permanentAdminID {
+		return b.reply(ctx, u, "No autorizado")
 	}
 
 	file, err := utils.FileFromMedia(u.EffectiveMessage.Message.Media)
 	if err != nil {
 		if link := utils.ExtractURLFromEntities(u.EffectiveMessage.Message); link != "" {
 			file = &types.DocumentFile{FileName: "video.mkv", MimeType: "video/mp4"}
-			return b.sendMediaToUser(ctx, u, link, file)
+			return b.sendLink(ctx, u, link, file)
 		}
 		return b.reply(ctx, u, "Archivo no soportado")
 	}
 
 	url := b.generateURL(u.EffectiveMessage.Message.ID, file)
-	return b.sendMediaToUser(ctx, u, url, file)
+	return b.sendLink(ctx, u, url, file)
 }
 
 func (b *TelegramBot) generateURL(msgID int, file *types.DocumentFile) string {
 	hash := utils.GetShortHash(fmt.Sprintf("%d%s", msgID, file.FileName), 8)
-	base := strings.TrimRight(b.config.BaseURL, "/")
-	return fmt.Sprintf("%s/%d/%s", base, msgID, hash)
+	return fmt.Sprintf("%s/%d/%s", strings.TrimRight(b.config.BaseURL, "/"), msgID, hash)
 }
 
-func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile) error {
-	keyboard := []tg.KeyboardButtonRow{
-		{Buttons: []tg.KeyboardButtonClass{&tg.KeyboardButtonURL{Text: "STREAM NOW", URL: fileURL}}},
-	}
-
+func (b *TelegramBot) sendLink(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile) error {
 	_, err := ctx.Reply(u, ext.ReplyTextString(fileURL), &ext.ReplyOpts{
-		Markup: &tg.ReplyInlineMarkup{Rows: keyboard},
+		Markup: &tg.ReplyInlineMarkup{
+			Rows: []tg.KeyboardButtonRow{
+				{Buttons: []tg.KeyboardButtonClass{
+					&tg.KeyboardButtonURL{Text: "STREAM NOW", URL: fileURL},
+				}},
+			},
+		},
 	})
 
 	wsMsg := map[string]string{
-		"url":      b.proxyIfNeeded(fileURL),
+		"url":      b.proxyURL(fileURL),
 		"fileName": file.FileName,
-		"mimeType": "video/mp4", // Truco mágico para MKV
+		"mimeType": "video/mp4",
 	}
 	b.webServer.GetWSManager().PublishMessage(u.EffectiveUser().ID, wsMsg)
 	return err
 }
 
-func (b *TelegramBot) proxyIfNeeded(urlStr string) string {
+func (b *TelegramBot) proxyURL(urlStr string) string {
 	if strings.HasPrefix(urlStr, "http") && !strings.Contains(urlStr, b.config.BaseURL) {
 		return "/proxy?url=" + url.QueryEscape(urlStr)
 	}
@@ -319,13 +309,9 @@ func (b *TelegramBot) proxyIfNeeded(urlStr string) string {
 
 // ==================== Admin Commands ====================
 func (b *TelegramBot) handleBan(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != permanentAdminID {
-		return nil
-	}
+	if u.EffectiveUser().ID != permanentAdminID { return nil }
 	args := strings.Fields(u.EffectiveMessage.Text)
-	if len(args) < 2 {
-		return b.reply(ctx, u, "/ban <id>")
-	}
+	if len(args) < 2 { return b.reply(ctx, u, "/ban <id>") }
 	id, _ := strconv.ParseInt(args[1], 10, 64)
 	if user := b.getUser(id); user != nil {
 		user.IsAuthorized = false
@@ -335,13 +321,9 @@ func (b *TelegramBot) handleBan(ctx *ext.Context, u *ext.Update) error {
 }
 
 func (b *TelegramBot) handleUnban(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != permanentAdminID {
-		return nil
-	}
+	if u.EffectiveUser().ID != permanentAdminID { return nil }
 	args := strings.Fields(u.EffectiveMessage.Text)
-	if len(args) < 2 {
-		return b.reply(ctx, u, "/unban <id>")
-	}
+	if len(args) < 2 { return b.reply(ctx, u, "/unban <id>") }
 	id, _ := strconv.ParseInt(args[1], 10, 64)
 	if user := b.getUser(id); user != nil {
 		user.IsAuthorized = true
@@ -351,34 +333,24 @@ func (b *TelegramBot) handleUnban(ctx *ext.Context, u *ext.Update) error {
 }
 
 func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != permanentAdminID {
-		return nil
-	}
+	if u.EffectiveUser().ID != permanentAdminID { return nil }
 	users := b.getAllUsers()
 	msg := "*Usuarios:*\n\n"
 	for i, user := range users {
 		status := "Baneado"
-		if user.IsAuthorized {
-			status = "Autorizado"
-		}
+		if user.IsAuthorized { status = "Autorizado" }
 		msg += fmt.Sprintf("%d. `%d` – %s – %s\n", i+1, user.UserID, user.FirstName, status)
 	}
 	return b.reply(ctx, u, msg)
 }
 
 func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != permanentAdminID {
-		return nil
-	}
+	if u.EffectiveUser().ID != permanentAdminID { return nil }
 	args := strings.Fields(u.EffectiveMessage.Text)
-	if len(args) < 2 {
-		return b.reply(ctx, u, "/userinfo <id>")
-	}
+	if len(args) < 2 { return b.reply(ctx, u, "/userinfo <id>") }
 	id, _ := strconv.ParseInt(args[1], 10, 64)
 	user := b.getUser(id)
-	if user == nil {
-		return b.reply(ctx, u, "No encontrado")
-	}
+	if user == nil { return b.reply(ctx, u, "No encontrado") }
 	return b.reply(ctx, u, fmt.Sprintf("ID: %d\nNombre: %s\nAuth: %t", user.UserID, user.FirstName, user.IsAuthorized))
 }
 
