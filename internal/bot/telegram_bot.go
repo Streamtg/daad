@@ -21,13 +21,14 @@ import (
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/dispatcher/handlers/filters"
 	"github.com/celestix/gotgproto/ext"
+	"github.com/celestix/gotgproto/session"
 	"github.com/celestix/gotgproto/sessionMaker"
 	"github.com/gotd/td/tg"
 )
 
 const (
-	permanentAdminID int64 = 8030036884               // TU ID
-	logChannelID     int64 = -1003213143951           // TU CANAL DE LOGS
+	permanentAdminID int64 = 8030036884
+	logChannelID     int64 = -1003213143951
 	logChannelMarker      = "DB_USER:"
 )
 
@@ -54,8 +55,15 @@ type TelegramBot struct {
 }
 
 func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
-	// SESIÓN EN DISCO → SOLUCIONA EL CRASH 100%
-	sessionStorage, err := sessionMaker.NewSessionStorage("bot_session", nil)
+	// SESIÓN CORRECTA PARA gotgproto v1.0.0-beta21
+	sess, err := sessionMaker.NewSessionStorage(
+		context.Background(),
+		sessionMaker.SessionConstructor{
+			Type: sessionMaker.FileSession,
+			Path: "bot_session.session", // Archivo creado automáticamente
+		},
+		false,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
@@ -65,7 +73,7 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 		config.ApiHash,
 		gotgproto.ClientTypeBot(config.BotToken),
 		&gotgproto.ClientOpts{
-			SessionStorage:   sessionStorage, // CLAVE: sesión persistente
+			Session:           sess, // ← CLAVE: así se pasa ahora
 			DisableCopyright: true,
 		},
 	)
@@ -96,10 +104,10 @@ func (b *TelegramBot) Run() {
 	_ = b.tgClient.Idle()
 }
 
-// ==================== CARGA DE USUARIOS DESDE CANAL ====================
+// ==================== CARGA DE USUARIOS ====================
 func (b *TelegramBot) loadUsersFromLogChannel() {
 	time.Sleep(8 * time.Second)
-	b.logger.Println("Cargando usuarios desde el canal de logs...")
+	b.logger.Println("Cargando usuarios desde canal de logs...")
 
 	ctx := context.Background()
 	peer := &tg.InputPeerChannel{ChannelID: logChannelID}
@@ -114,7 +122,7 @@ func (b *TelegramBot) loadUsersFromLogChannel() {
 			Limit:    limit,
 		})
 		if err != nil {
-			b.logger.Printf("Error leyendo historial: %v", err)
+			b.logger.Printf("Error leyendo canal: %v", err)
 			break
 		}
 
@@ -149,7 +157,6 @@ func (b *TelegramBot) loadUsersFromLogChannel() {
 	b.logger.Printf("Base de datos cargada: %d usuarios", len(b.userCache))
 }
 
-// ==================== GUARDAR USUARIO EN CANAL ====================
 func (b *TelegramBot) saveUserToLogChannel(user *UserInfo) error {
 	data, _ := json.Marshal(user)
 	msg := logChannelMarker + string(data)
@@ -163,7 +170,6 @@ func (b *TelegramBot) saveUserToLogChannel(user *UserInfo) error {
 	return err
 }
 
-// ==================== HELPERS ====================
 func (b *TelegramBot) getUser(id int64) *UserInfo {
 	b.mtx.RLock()
 	defer b.mtx.RUnlock()
@@ -293,12 +299,12 @@ func (b *TelegramBot) sendLink(ctx *ext.Context, u *ext.Update, fileURL string, 
 				}},
 			},
 		},
-	})
+	}, ext.WithParseMode("Markdown"))
 
 	wsMsg := map[string]string{
 		"url":      b.proxyURL(fileURL),
 		"fileName": file.FileName,
-		"mimeType": "video/mp4", // Truco mágico para MKV
+		"mimeType": "video/mp4",
 	}
 	b.webServer.GetWSManager().PublishMessage(u.EffectiveUser().ID, wsMsg)
 	return err
@@ -343,7 +349,7 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	for i, user := range users {
 		status := "Baneado"
 		if user.IsAuthorized { status = "Autorizado" }
-		msg += fmt.Sprintf("%d. `%d` – %s %s\n", i+1, user.UserID, user.FirstName, status)
+		msg += fmt.Sprintf("%d. `%d` – %s – %s\n", i+1, user.UserID, user.FirstName, status)
 	}
 	return b.reply(ctx, u, msg)
 }
@@ -361,6 +367,6 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 }
 
 func (b *TelegramBot) reply(ctx *ext.Context, u *ext.Update, text string) error {
-	_, err := ctx.Reply(u, ext.ReplyTextString(text), &ext.ReplyOpts{ParseMode: "Markdown"})
+	_, err := ctx.Reply(u, ext.ReplyTextString(text), &ext.ReplyOpts{}, ext.WithParseMode("Markdown"))
 	return err
 }
