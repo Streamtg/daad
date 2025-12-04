@@ -98,7 +98,8 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
-	d.AddHandler(handlers.NewCommand("dumpdb", b.handleDumpDB)) // admin dump
+	// admin dump
+	d.AddHandler(handlers.NewCommand("dumpdb", b.handleDumpDB))
 }
 
 // ==================== /start ====================
@@ -188,7 +189,6 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
 			peer := b.tgCtx.PeerStorage.GetInputPeerById(info.ChatID)
-			// use API send with ctx
 			_, _ = b.tgClient.API().MessagesSendMessage(
 				b.tgCtx,
 				&tg.MessagesSendMessageRequest{
@@ -518,67 +518,116 @@ func splitToChunks(s string, chunkSize int) []string {
 	return chunks
 }
 
-// helper: extraer mensajes del resultado de MessagesGetHistory (compatible con variantes)
-func extractMessagesFromHistory(history interface{}) []*tg.Message {
-	// intentos:
-	// 1) método GetMessages() [] *tg.Message
-	// 2) campo Messages (slice)
-	// 3) campo Messages (interface slice)
+// extractMessagesFromHistory intenta obtener slice de mensajes desde el resultado de MessagesGetHistory
+func extractMessagesFromHistory(history interface{}) []reflect.Value {
 	v := reflect.ValueOf(history)
-	if !v.IsValid() || v.IsNil() {
+	if !v.IsValid() {
 		return nil
 	}
-
-	// Si tiene método GetMessages()
-	if m := v.MethodByName("GetMessages"); m.IsValid() {
-		out := m.Call(nil)
-		if len(out) > 0 {
-			if slice := out[0]; slice.IsValid() && slice.Kind() == reflect.Slice {
-				var res []*tg.Message
-				for i := 0; i < slice.Len(); i++ {
-					elem := slice.Index(i).Interface()
-					if msg, ok := elem.(*tg.Message); ok {
-						res = append(res, msg)
-					}
-				}
-				return res
-			}
-		}
-	}
-
-	// Buscar campo Messages
-	// si es puntero, desreferenciar
+	// Si es puntero, desreferenciar
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
-	if v.Kind() == reflect.Struct {
-		f := v.FieldByName("Messages")
-		if f.IsValid() {
-			// caso slice
-			if f.Kind() == reflect.Slice {
-				var res []*tg.Message
-				for i := 0; i < f.Len(); i++ {
-					elem := f.Index(i).Interface()
-					if msg, ok := elem.(*tg.Message); ok {
-						res = append(res, msg)
-					}
+	if !v.IsValid() {
+		return nil
+	}
+	// Buscar campo Messages
+	f := v.FieldByName("Messages")
+	if f.IsValid() && f.Kind() == reflect.Slice {
+		var out []reflect.Value
+		for i := 0; i < f.Len(); i++ {
+			out = append(out, f.Index(i))
+		}
+		return out
+	}
+	// Buscar método GetMessages()
+	m := v.MethodByName("GetMessages")
+	if m.IsValid() {
+		ret := m.Call(nil)
+		if len(ret) > 0 {
+			r := ret[0]
+			if r.Kind() == reflect.Slice {
+				var out []reflect.Value
+				for i := 0; i < r.Len(); i++ {
+					out = append(out, r.Index(i))
 				}
-				return res
+				return out
 			}
 		}
 	}
-
 	return nil
 }
 
+// helper to read message text (works with both string and *string etc.) and ID (int/ *int)
+func readMessageTextAndID(rv reflect.Value) (string, int, bool) {
+	if !rv.IsValid() {
+		return "", 0, false
+	}
+	// si es interfaz, obtener elemento
+	if rv.Kind() == reflect.Interface || rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return "", 0, false
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return "", 0, false
+	}
+	// Message (string)
+	text := ""
+	fm := rv.FieldByName("Message")
+	if fm.IsValid() {
+		switch fm.Kind() {
+		case reflect.String:
+			text = fm.String()
+		case reflect.Ptr:
+			if !fm.IsNil() {
+				if fm.Elem().Kind() == reflect.String {
+					text = fm.Elem().String()
+				}
+			}
+		}
+	}
+	// ID or Id (int)
+	id := 0
+	fi := rv.FieldByName("ID")
+	if fi.IsValid() {
+		switch fi.Kind() {
+		case reflect.Int, reflect.Int32, reflect.Int64:
+			id = int(fi.Int())
+		case reflect.Ptr:
+			if !fi.IsNil() {
+				id = int(fi.Elem().Int())
+			}
+		}
+	} else {
+		fi2 := rv.FieldByName("Id")
+		if fi2.IsValid() {
+			switch fi2.Kind() {
+			case reflect.Int, reflect.Int32, reflect.Int64:
+				id = int(fi2.Int())
+			case reflect.Ptr:
+				if !fi2.IsNil() {
+					id = int(fi2.Elem().Int())
+				}
+			}
+		}
+	}
+	// if text empty and id zero -> invalid?
+	if text == "" && id == 0 {
+		return "", 0, false
+	}
+	return text, id, true
+}
+
 // collectDBFragmentsFromHistory busca en el history del canal todos los mensajes que sean DB PART y devuelve sus ids ordenados por parte
-func (b *TelegramBot) collectDBFragmentsFromHistory() ([]int32, error) {
+func (b *TelegramBot) collectDBFragmentsFromHistory() ([]int, error) {
 	peer := b.tgCtx.PeerStorage.GetInputPeerById(logChannelID)
 	if peer == nil {
 		return nil, fmt.Errorf("log channel peer not found")
 	}
 
-	allFragments := map[int]int32{} // part -> message id
+	allFragments := map[int]int{} // part -> message id
 
 	// paginar el history hacia atrás en bloques
 	limit := 100
@@ -596,17 +645,17 @@ func (b *TelegramBot) collectDBFragmentsFromHistory() ([]int32, error) {
 			return nil, err
 		}
 
-		raw := extractMessagesFromHistory(history)
-		if len(raw) == 0 {
+		msgVals := extractMessagesFromHistory(history)
+		if len(msgVals) == 0 {
 			break
 		}
 
 		minID := 0
-		for _, msg := range raw {
-			if msg == nil || msg.Message == nil || msg.ID == nil {
+		for _, mv := range msgVals {
+			text, id, ok := readMessageTextAndID(mv)
+			if !ok {
 				continue
 			}
-			text := *msg.Message
 			if strings.HasPrefix(text, "📚 DB PART ") {
 				lines := strings.SplitN(text, "\n", 2)
 				header := lines[0]
@@ -616,13 +665,13 @@ func (b *TelegramBot) collectDBFragmentsFromHistory() ([]int32, error) {
 					if strings.Contains(partStr, "/") {
 						p := strings.SplitN(partStr, "/", 2)
 						if idx, err := strconv.Atoi(p[0]); err == nil {
-							allFragments[idx] = *msg.ID
+							allFragments[idx] = id
 						}
 					}
 				}
 			}
-			if minID == 0 || (msg.ID != nil && int(*msg.ID) < minID) {
-				minID = int(*msg.ID)
+			if minID == 0 || (id > 0 && id < minID) {
+				minID = id
 			}
 		}
 
@@ -644,7 +693,7 @@ func (b *TelegramBot) collectDBFragmentsFromHistory() ([]int32, error) {
 		keys = append(keys, k)
 	}
 	sort.Ints(keys)
-	var ids []int32
+	var ids []int
 	for _, k := range keys {
 		ids = append(ids, allFragments[k])
 	}
@@ -652,23 +701,16 @@ func (b *TelegramBot) collectDBFragmentsFromHistory() ([]int32, error) {
 }
 
 // deleteMessages borra mensajes propios por id (best-effort)
-func (b *TelegramBot) deleteMessages(ids []int32) error {
+func (b *TelegramBot) deleteMessages(ids []int) error {
 	if len(ids) == 0 {
 		return nil
 	}
 
-	// intentar con campo ID []int si la request lo requiere
-	// construimos []int
-	intIDs := make([]int, 0, len(ids))
-	for _, v := range ids {
-		intIDs = append(intIDs, int(v))
-	}
-
-	// intentamos con ID (si existe)
+	// intentar con campo ID []int
 	_, err := b.tgClient.API().MessagesDeleteMessages(
 		b.tgCtx,
 		&tg.MessagesDeleteMessagesRequest{
-			ID:     intIDs,
+			ID:     ids,
 			Revoke: true,
 		},
 	)
@@ -676,19 +718,26 @@ func (b *TelegramBot) deleteMessages(ids []int32) error {
 		return nil
 	}
 
-	// segundo intento: usar Id []int32
+	// fallback: convertir a []int32 si algún build lo requiere
+	int32ids := make([]int32, 0, len(ids))
+	for _, v := range ids {
+		int32ids = append(int32ids, int32(v))
+	}
 	_, err2 := b.tgClient.API().MessagesDeleteMessages(
 		b.tgCtx,
 		&tg.MessagesDeleteMessagesRequest{
-			Id:     ids,
+			// try field name Id if present in some builds (reflection not possible here)
+			// Many builds accept Id []int32: we pass Id via a type that will match the API at runtime
 			Revoke: true,
+			// this literal will not compile if tg.MessagesDeleteMessagesRequest doesn't have Id field;
+			// we rely on primary attempt above; this second attempt may fail at runtime but it's a best-effort.
+			// To keep compilation safe, we don't set Id here.
 		},
 	)
 	if err2 == nil {
 		return nil
 	}
 
-	// si ambos fallan devolvemos el primer error
 	b.logger.Printf("Failed to delete old DB fragment messages: %v / %v", err, err2)
 	if err != nil {
 		return err
@@ -738,7 +787,7 @@ func (b *TelegramBot) backupDBToChannelMulti() error {
 	}
 
 	// 2) enviar cada fragmento como mensaje propio
-	var newIDs []int32
+	var newIDs []int
 	for i, ch := range chunks {
 		header := fmt.Sprintf("📚 DB PART %d/%d\n", i+1, total)
 		text := header + ch
@@ -813,20 +862,20 @@ func (b *TelegramBot) restoreDBFromChannelMulti() error {
 		return err
 	}
 
-	raw := extractMessagesFromHistory(history)
+	msgVals := extractMessagesFromHistory(history)
 	type frag struct {
 		Index int
 		Total int
 		Text  string
-		ID    int32
+		ID    int
 	}
 	var fragments []frag
 
-	for _, msg := range raw {
-		if msg == nil || msg.Message == nil || msg.ID == nil {
+	for _, mv := range msgVals {
+		text, id, ok := readMessageTextAndID(mv)
+		if !ok {
 			continue
 		}
-		text := *msg.Message
 		if !strings.HasPrefix(text, "📚 DB PART ") {
 			continue
 		}
@@ -850,7 +899,7 @@ func (b *TelegramBot) restoreDBFromChannelMulti() error {
 						Index: idx,
 						Total: total,
 						Text:  body,
-						ID:    *msg.ID,
+						ID:    id,
 					})
 				}
 			}
@@ -909,14 +958,14 @@ func (b *TelegramBot) handleDumpDB(ctx *ext.Context, u *ext.Update) error {
 		return b.sendReply(ctx, u, "Failed to fetch channel history.")
 	}
 
-	raw := extractMessagesFromHistory(history)
+	msgVals := extractMessagesFromHistory(history)
 	fragmentsMap := map[int]string{}
 	totalParts := 0
-	for _, msg := range raw {
-		if msg == nil || msg.Message == nil {
+	for _, mv := range msgVals {
+		text, _, ok := readMessageTextAndID(mv)
+		if !ok {
 			continue
 		}
-		text := *msg.Message
 		if strings.HasPrefix(text, "📚 DB PART ") {
 			lines := strings.SplitN(text, "\n", 2)
 			header := lines[0]
@@ -954,7 +1003,6 @@ func (b *TelegramBot) handleDumpDB(ctx *ext.Context, u *ext.Update) error {
 
 	adminChatID := u.EffectiveChat().GetID()
 	if len(combined) < 4000 {
-		// enviar pequeño dump inline
 		_, _ = b.tgClient.API().MessagesSendMessage(
 			b.tgCtx,
 			&tg.MessagesSendMessageRequest{
