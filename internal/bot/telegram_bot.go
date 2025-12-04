@@ -1,11 +1,9 @@
 package bot
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand"
 	"net/url"
 	"reflect"
