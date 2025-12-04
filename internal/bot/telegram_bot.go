@@ -45,7 +45,6 @@ const permanentAdminID int64 = 8030036884
 func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", cfg.DatabasePath)
 
-	// restaurar DB del canal si no existe localmente
 	if _, err := os.Stat(cfg.DatabasePath); os.IsNotExist(err) {
 		log.Printf("Local DB not found, trying to download last backup…")
 		if err := downloadDBFromLogChannel(cfg, log); err != nil {
@@ -428,7 +427,6 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 
 /* ----------  BACKUP / RESTORE  ---------- */
 
-// uploadDBToLogChannel sube la base de datos al canal
 func (b *TelegramBot) uploadDBToLogChannel(comment string) {
 	if b.logChannelID == 0 {
 		return
@@ -440,20 +438,23 @@ func (b *TelegramBot) uploadDBToLogChannel(comment string) {
 	}
 	defer f.Close()
 
-	up, err := ext.Upload(b.tgCtx, f, b.config.DatabasePath, 512*1024)
+	// 1) subir archivo
+	up, err := b.tgClient.Client().UploadFile(b.tgCtx, f, b.config.DatabasePath, 512*1024)
 	if err != nil {
 		b.logger.Printf("backup: upload error: %v", err)
 		return
 	}
 
+	// 2) construir media
 	media := &tg.InputMediaUploadedDocument{
 		File:       up,
 		MimeType:   "application/x-sqlite3",
 		Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: fmt.Sprintf("base_%d.db", time.Now().Unix())}},
 	}
 
+	// 3) enviar
 	peer := b.tgCtx.PeerStorage.GetInputPeerById(b.logChannelID)
-	_, err = b.tgCtx.SendMessage(b.logChannelID, &tg.MessagesSendMediaRequest{
+	_, err = b.tgClient.Client().MessagesSendMedia(b.tgCtx, &tg.MessagesSendMediaRequest{
 		Peer:    peer,
 		Media:   media,
 		Message: comment,
@@ -463,7 +464,6 @@ func (b *TelegramBot) uploadDBToLogChannel(comment string) {
 	}
 }
 
-// downloadDBFromLogChannel descarga la última copia del canal
 func downloadDBFromLogChannel(cfg *config.Configuration, log *logger.Logger) error {
 	tmpClient, err := gotgproto.NewClient(
 		cfg.ApiID,
@@ -484,13 +484,22 @@ func downloadDBFromLogChannel(cfg *config.Configuration, log *logger.Logger) err
 	ctx := tmpClient.CreateContext()
 	peer := ctx.PeerStorage.GetInputPeerById(logChannelID)
 
-	hist, err := ctx.GetMessagesHistory(peer, 20)
+	// 1) historial
+	resp, err := tmpClient.Client().MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+		Peer:  peer,
+		Limit: 20,
+	})
 	if err != nil {
 		return fmt.Errorf("cannot fetch history: %w", err)
 	}
+	msgs, ok := resp.(*tg.MessagesMessagesSlice)
+	if !ok {
+		return fmt.Errorf("unexpected history type")
+	}
 
+	// 2) buscar último documento
 	var lastDoc *tg.Message
-	for _, m := range hist {
+	for _, m := range msgs.Messages {
 		msg, ok := m.(*tg.Message)
 		if !ok || msg.Media == nil {
 			continue
@@ -504,12 +513,14 @@ func downloadDBFromLogChannel(cfg *config.Configuration, log *logger.Logger) err
 		return fmt.Errorf("no DB document found in channel")
 	}
 
+	// 3) descargar
 	media := lastDoc.Media.(*tg.MessageMediaDocument)
 	buf := &bytes.Buffer{}
-	if _, err := ext.Download(ctx, media, buf, &ext.DownloadMediaOpts{}); err != nil {
+	if _, err := tmpClient.Client().DownloadFile(ctx, media.Document, buf); err != nil {
 		return fmt.Errorf("download error: %w", err)
 	}
 
+	// 4) guardar
 	out, err := os.Create(cfg.DatabasePath)
 	if err != nil {
 		return fmt.Errorf("create file error: %w", err)
