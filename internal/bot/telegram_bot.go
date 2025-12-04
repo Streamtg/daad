@@ -1,7 +1,6 @@
 package bot
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math/rand"
