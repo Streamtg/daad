@@ -34,14 +34,9 @@ type TelegramBot struct {
 	userRepository *data.UserRepository
 	db             *sql.DB
 	webServer      *web.Server
-
-	dbMessageIDs []int32 // cached fragment message ids
 }
 
 const permanentAdminID int64 = 8030036884 // TU ID – ADMIN ÚNICO Y PERMANENTE
-
-// Canal de logs donde se guarda TODO
-const logChannelID int64 = -1003213143951
 
 func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", config.DatabasePath)
@@ -73,7 +68,7 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 	tgCtx := tgClient.CreateContext()
 	webServer := web.NewServer(config, tgClient, tgCtx, log, userRepository)
 
-	bot := &TelegramBot{
+	return &TelegramBot{
 		config:         config,
 		tgClient:       tgClient,
 		tgCtx:          tgCtx,
@@ -81,20 +76,7 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 		userRepository: userRepository,
 		db:             db,
 		webServer:      webServer,
-		dbMessageIDs:   []int32{},
-	}
-
-	// Restaurar DB desde canal de logs en background
-	go func() {
-		time.Sleep(2 * time.Second)
-		if err := bot.restoreDBFromChannelMulti(); err != nil {
-			bot.logger.Printf("DB restore: %v", err)
-		} else {
-			bot.logger.Printf("Database restored successfully from log channel (multi-part).")
-		}
-	}()
-
-	return bot, nil
+	}, nil
 }
 
 func (b *TelegramBot) Run() {
@@ -194,7 +176,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 		return b.sendReply(ctx, u, "Failed to ban user.")
 	}
 
-	// sincronizar DB al canal (multi)
+	// sincronizar DB al canal
 	if err := b.backupDBToChannelMulti(); err != nil {
 		b.logger.Printf("Failed to backup DB after /ban: %v", err)
 	}
@@ -235,7 +217,7 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 		return b.sendReply(ctx, u, "Failed to unban user.")
 	}
 
-	// sincronizar DB al canal (multi)
+	// sincronizar DB al canal
 	if err := b.backupDBToChannelMulti(); err != nil {
 		b.logger.Printf("Failed to backup DB after /unban: %v", err)
 	}
@@ -447,6 +429,9 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 // --------------------- DB <-> Channel multi-message sync helpers ---------------------
 //
 
+// Canal de logs (ya definido por ti): -1003213143951
+const logChannelID int64 = -1003213143951
+
 type userDump struct {
 	UserID       int64  `json:"user_id"`
 	ChatID       int64  `json:"chat_id"`
@@ -458,7 +443,7 @@ type userDump struct {
 	CreatedAt    string `json:"created_at"`
 }
 
-// exportDatabaseToJSON lee la tabla users local y devuelve JSON indentado
+// exportDatabaseToJSON lee la tabla users local usando userRepository y devuelve JSON indentado
 func (b *TelegramBot) exportDatabaseToJSON() ([]byte, error) {
 	users, err := b.userRepository.GetAllUsers(0, 1000000)
 	if err != nil {
@@ -525,6 +510,104 @@ func splitToChunks(s string, chunkSize int) []string {
 	return chunks
 }
 
+// collectDBFragmentsFromHistory busca en el history del canal todos los mensajes que sean DB PART y devuelve sus ids ordenados por parte
+func (b *TelegramBot) collectDBFragmentsFromHistory() ([]int32, error) {
+	peer := b.tgCtx.PeerStorage.GetInputPeerById(logChannelID)
+	if peer == nil {
+		return nil, fmt.Errorf("log channel peer not found")
+	}
+
+	allFragments := map[int]int32{} // part -> message id
+
+	// paginar el history hacia atrás en bloques
+	limit := int32(100)
+	offsetID := int32(0)
+	for {
+		history, err := b.tgClient.API().MessagesGetHistory(
+			b.tgCtx,
+			&tg.MessagesGetHistoryRequest{
+				Peer:     peer,
+				Limit:    limit,
+				OffsetID: offsetID,
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		raw := history.GetMessages()
+		if len(raw) == 0 {
+			break
+		}
+
+		minID := int32(0)
+		for _, m := range raw {
+			msg, ok := m.(*tg.Message)
+			if !ok || msg.Message == nil || msg.ID == nil {
+				continue
+			}
+			text := *msg.Message
+			if strings.HasPrefix(text, "📚 DB PART ") {
+				lines := strings.SplitN(text, "\n", 2)
+				header := lines[0]
+				parts := strings.Fields(header)
+				if len(parts) >= 4 {
+					partStr := parts[3] // "X/Y"
+					if strings.Contains(partStr, "/") {
+						p := strings.SplitN(partStr, "/", 2)
+						if idx, err := strconv.Atoi(p[0]); err == nil {
+							allFragments[idx] = *msg.ID
+						}
+					}
+				}
+			}
+			if minID == 0 || (msg.ID != nil && *msg.ID < minID) {
+				minID = *msg.ID
+			}
+		}
+
+		// si no podemos ir más atrás, rompemos
+		if minID <= 1 {
+			break
+		}
+		// preparar siguiente paginación: pedir mensajes anteriores a minID-1
+		offsetID = minID - 1
+	}
+
+	if len(allFragments) == 0 {
+		return nil, nil
+	}
+
+	// construir lista ordenada
+	keys := make([]int, 0, len(allFragments))
+	for k := range allFragments {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	var ids []int32
+	for _, k := range keys {
+		ids = append(ids, allFragments[k])
+	}
+	return ids, nil
+}
+
+// deleteMessages borra mensajes propios por id (best-effort)
+func (b *TelegramBot) deleteMessages(ids []int32) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := b.tgClient.API().MessagesDeleteMessages(
+		b.tgCtx,
+		&tg.MessagesDeleteMessagesRequest{
+			Id:     ids,
+			Revoke: true,
+		},
+	)
+	if err != nil {
+		b.logger.Printf("Failed to delete old DB fragment messages: %v", err)
+	}
+	return err
+}
+
 // backupDBToChannelMulti exporta DB y la guarda fragmentada en mensajes del canal de logs
 func (b *TelegramBot) backupDBToChannelMulti() error {
 	data, err := b.exportDatabaseToJSON()
@@ -546,130 +629,44 @@ func (b *TelegramBot) backupDBToChannelMulti() error {
 		return fmt.Errorf("log channel peer not found")
 	}
 
-	// 1) recoger mensajes antiguos de DB (si existen) y borrarlos (mejor limpiar y reescribir)
+	// 1) recoger mensajes antiguos de DB (si existen) y borrarlos (limpiar y reescribir)
 	oldIDs, err := b.collectDBFragmentsFromHistory()
 	if err == nil && len(oldIDs) > 0 {
-		_ = b.deleteMessages(peer, oldIDs)
+		_ = b.deleteMessages(oldIDs)
+		// pequeña espera para evitar race
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	// 2) enviar cada fragmento como mensaje propio
-	var sentIDs []int32
+	var newIDs []int32
 	for i, ch := range chunks {
 		header := fmt.Sprintf("📚 DB PART %d/%d\n", i+1, total)
 		text := header + ch
-		_, err := b.tgClient.API().MessagesSendMessage(&tg.MessagesSendMessageRequest{
-			Peer:    peer,
-			Message: text,
-		})
+		_, err := b.tgClient.API().MessagesSendMessage(
+			b.tgCtx,
+			&tg.MessagesSendMessageRequest{
+				Peer:    peer,
+				Message: text,
+			},
+		)
 		if err != nil {
 			b.logger.Printf("Failed to send DB fragment %d: %v", i+1, err)
 			continue
 		}
 		// breve pausa para indexación
 		time.Sleep(120 * time.Millisecond)
-		// recopilar ids actuales (best-effort)
+		// mejor esfuerzo: recolectar ids actuales
 		idsNow, _ := b.collectDBFragmentsFromHistory()
 		if len(idsNow) > 0 {
-			sentIDs = idsNow
+			newIDs = idsNow
 		}
 	}
 
-	if len(sentIDs) > 0 {
-		b.dbMessageIDs = sentIDs
+	// actualizar cache local (opcional)
+	if len(newIDs) > 0 {
+		b.logger.Printf("DB fragments updated: %d parts stored", len(newIDs))
 	}
 
-	return nil
-}
-
-// collectDBFragmentsFromHistory busca en el history del canal todos los mensajes que sean DB PART y devuelve sus ids (ordenados por parte)
-func (b *TelegramBot) collectDBFragmentsFromHistory() ([]int32, error) {
-	peer := b.tgCtx.PeerStorage.GetInputPeerById(logChannelID)
-	if peer == nil {
-		return nil, fmt.Errorf("log channel peer not found")
-	}
-
-	allFragments := map[int]int32{} // part -> message id
-
-	// paginar el history hacia atrás en bloques
-	limit := 100
-	offsetID := 0
-	for {
-		history, err := b.tgClient.API().MessagesGetHistory(&tg.MessagesGetHistoryRequest{
-			Peer:     peer,
-			Limit:    limit,
-			OffsetID: offsetID,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(history.Messages) == 0 {
-			break
-		}
-
-		minID := 0
-		for _, m := range history.Messages {
-			msg, ok := m.(*tg.Message)
-			if !ok || msg.Message == nil || msg.ID == nil {
-				continue
-			}
-			text := *msg.Message
-			if strings.HasPrefix(text, "📚 DB PART ") {
-				lines := strings.SplitN(text, "\n", 2)
-				header := lines[0]
-				parts := strings.Fields(header)
-				if len(parts) >= 4 {
-					partStr := parts[3] // "X/Y"
-					if strings.Contains(partStr, "/") {
-						p := strings.SplitN(partStr, "/", 2)
-						if idx, err := strconv.Atoi(p[0]); err == nil {
-							allFragments[idx] = *msg.ID
-						}
-					}
-				}
-			}
-			if *msg.ID < minID || minID == 0 {
-				minID = int(*msg.ID)
-			}
-		}
-
-		// si no podemos ir más atrás, rompemos
-		if minID <= 1 {
-			break
-		}
-		// preparar siguiente paginación: pedir mensajes anteriores a minID-1
-		offsetID = minID - 1
-		// si no hay más elementos se cortará en la próxima iteración
-	}
-
-	if len(allFragments) == 0 {
-		return nil, nil
-	}
-
-	// construir lista ordenada
-	keys := make([]int, 0, len(allFragments))
-	for k := range allFragments {
-		keys = append(keys, k)
-	}
-	sort.Ints(keys)
-	var ids []int32
-	for _, k := range keys {
-		ids = append(ids, allFragments[k])
-	}
-	return ids, nil
-}
-
-// deleteMessages borra mensajes propios por id (best-effort)
-func (b *TelegramBot) deleteMessages(peer tg.InputPeerClass, ids []int32) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	_, err := b.tgClient.API().MessagesDeleteMessages(&tg.MessagesDeleteMessagesRequest{
-		ID:     ids,
-		Revoke: true,
-	})
-	if err != nil {
-		b.logger.Printf("Failed to delete old DB fragment messages: %v", err)
-	}
 	return nil
 }
 
@@ -687,10 +684,13 @@ func (b *TelegramBot) restoreDBFromChannelMulti() error {
 	if len(ids) == 0 {
 		// no fragments, crear uno inicial vacío (1/1)
 		initial := "📚 DB PART 1/1\n[]"
-		_, err := b.tgClient.API().MessagesSendMessage(&tg.MessagesSendMessageRequest{
-			Peer:    peer,
-			Message: initial,
-		})
+		_, err := b.tgClient.API().MessagesSendMessage(
+			b.tgCtx,
+			&tg.MessagesSendMessageRequest{
+				Peer:    peer,
+				Message: initial,
+			},
+		)
 		if err != nil {
 			return fmt.Errorf("failed to create initial DB message: %w", err)
 		}
@@ -702,14 +702,18 @@ func (b *TelegramBot) restoreDBFromChannelMulti() error {
 	}
 
 	// obtener history amplio y extraer fragments con su texto
-	history, err := b.tgClient.API().MessagesGetHistory(&tg.MessagesGetHistoryRequest{
-		Peer:  peer,
-		Limit: 500,
-	})
+	history, err := b.tgClient.API().MessagesGetHistory(
+		b.tgCtx,
+		&tg.MessagesGetHistoryRequest{
+			Peer:  peer,
+			Limit: 500,
+		},
+	)
 	if err != nil {
 		return err
 	}
 
+	raw := history.GetMessages()
 	type frag struct {
 		Index int
 		Total int
@@ -718,7 +722,7 @@ func (b *TelegramBot) restoreDBFromChannelMulti() error {
 	}
 	var fragments []frag
 
-	for _, m := range history.Messages {
+	for _, m := range raw {
 		msg, ok := m.(*tg.Message)
 		if !ok || msg.Message == nil || msg.ID == nil {
 			continue
@@ -771,103 +775,6 @@ func (b *TelegramBot) restoreDBFromChannelMulti() error {
 		return fmt.Errorf("failed to import DB from combined fragments: %w", err)
 	}
 
-	// actualizar cache de ids
-	var idsCache []int32
-	for _, f := range fragments {
-		idsCache = append(idsCache, f.ID)
-	}
-	b.dbMessageIDs = idsCache
-
-	return nil
-}
-
-//
-// --------------------- /dumpdb (admin) ---------------------
-//
-
-func (b *TelegramBot) handleDumpDB(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != permanentAdminID {
-		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
-	}
-
-	peer := b.tgCtx.PeerStorage.GetInputPeerById(logChannelID)
-	if peer == nil {
-		return b.sendReply(ctx, u, "Log channel peer not found.")
-	}
-
-	ids, err := b.collectDBFragmentsFromHistory()
-	if err != nil {
-		return b.sendReply(ctx, u, "Failed to fetch DB fragments.")
-	}
-	if len(ids) == 0 {
-		return b.sendReply(ctx, u, "No DB fragments found.")
-	}
-
-	history, err := b.tgClient.API().MessagesGetHistory(&tg.MessagesGetHistoryRequest{
-		Peer:  peer,
-		Limit: 500,
-	})
-	if err != nil {
-		return b.sendReply(ctx, u, "Failed to fetch channel history.")
-	}
-
-	fragmentsMap := map[int]string{}
-	totalParts := 0
-	for _, m := range history.Messages {
-		msg, ok := m.(*tg.Message)
-		if !ok || msg.Message == nil {
-			continue
-		}
-		text := *msg.Message
-		if strings.HasPrefix(text, "📚 DB PART ") {
-			lines := strings.SplitN(text, "\n", 2)
-			header := lines[0]
-			body := ""
-			if len(lines) > 1 {
-				body = lines[1]
-			}
-			parts := strings.Fields(header)
-			if len(parts) >= 4 {
-				partStr := parts[3]
-				if strings.Contains(partStr, "/") {
-					p := strings.SplitN(partStr, "/", 2)
-					if idx, err := strconv.Atoi(p[0]); err == nil {
-						if t, err2 := strconv.Atoi(p[1]); err2 == nil {
-							totalParts = t
-						}
-						fragmentsMap[idx] = body
-					}
-				}
-			}
-		}
-	}
-
-	// reconstruir ordenado
-	var keys []int
-	for k := range fragmentsMap {
-		keys = append(keys, k)
-	}
-	sort.Ints(keys)
-	var builder strings.Builder
-	for _, k := range keys {
-		builder.WriteString(fragmentsMap[k])
-	}
-	combined := builder.String()
-
-	adminChatID := u.EffectiveChat().GetID()
-	if len(combined) < 4000 {
-		// enviar pequeño dump inline
-		b.tgCtx.SendMessage(adminChatID, &tg.MessagesSendMessageRequest{
-			Peer:    b.tgCtx.PeerStorage.GetInputPeerById(adminChatID),
-			Message: "📂 DATABASE DUMP\n" + combined,
-		})
-	} else {
-		// enviar aviso y señalar al canal (document upload puede implementarse si lo deseas)
-		b.tgCtx.SendMessage(adminChatID, &tg.MessagesSendMessageRequest{
-			Peer:    b.tgCtx.PeerStorage.GetInputPeerById(adminChatID),
-			Message: fmt.Sprintf("Database dump is large (%d bytes). Please check the log channel %d for fragments (total parts: %d).", len(combined), logChannelID, totalParts),
-		})
-	}
-
+	b.logger.Printf("Database restored from %d fragments (total bytes: %d)", len(fragments), len(combined))
 	return nil
 }
