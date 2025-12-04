@@ -40,10 +40,12 @@ type TelegramBot struct {
 
 const permanentAdminID int64 = 8030036884
 
-// NewTelegramBot crea el bot y, si no existe DB local, intenta restaurarla del canal
+/* ----------  constructor  ---------- */
+
 func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", cfg.DatabasePath)
 
+	// restaurar DB del canal si no existe localmente
 	if _, err := os.Stat(cfg.DatabasePath); os.IsNotExist(err) {
 		log.Printf("Local DB not found, trying to download last backup…")
 		if err := downloadDBFromLogChannel(cfg, log); err != nil {
@@ -92,6 +94,8 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 	}, nil
 }
 
+/* ----------  ciclo de vida  ---------- */
+
 func (b *TelegramBot) Run() {
 	b.logger.Printf("Starting Telegram bot (@%s)…\n", b.tgClient.Self.Username)
 	b.registerHandlers()
@@ -113,7 +117,8 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 }
 
-// ==================== /start ====================
+/* ----------  comandos  ---------- */
+
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -152,7 +157,6 @@ Support: @Wavetouch_bot`
 	return b.sendReply(ctx, u, welcome)
 }
 
-// ==================== /ban ====================
 func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -190,7 +194,6 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nSupport: @Wavetouch_bot\nReason: %s", targetID, reason))
 }
 
-// ==================== /unban ====================
 func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
@@ -221,7 +224,6 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been unbanned.", targetID))
 }
 
-// ==================== /listusers ====================
 func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
@@ -266,7 +268,6 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	return b.sendReply(ctx, u, msg.String())
 }
 
-// ==================== /userinfo ====================
 func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
@@ -306,7 +307,6 @@ Joined: %s`,
 	return b.sendReply(ctx, u, msg)
 }
 
-// ==================== NEW – /sms ====================
 func (b *TelegramBot) handleSMS(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
@@ -338,7 +338,8 @@ func (b *TelegramBot) handleSMS(ctx *ext.Context, u *ext.Update) error {
 	return b.sendReply(ctx, u, fmt.Sprintf("Message sent to %d users.", sent))
 }
 
-// ==================== Media & resto ====================
+/* ----------  media  ---------- */
+
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -425,10 +426,9 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 	return err
 }
 
-// ==========================================================
-// BACKUP / RESTAURA BASE DE DATOS VÍA CANAL DE LOGS
-// ==========================================================
+/* ----------  BACKUP / RESTORE  ---------- */
 
+// uploadDBToLogChannel sube la base de datos al canal
 func (b *TelegramBot) uploadDBToLogChannel(comment string) {
 	if b.logChannelID == 0 {
 		return
@@ -440,20 +440,20 @@ func (b *TelegramBot) uploadDBToLogChannel(comment string) {
 	}
 	defer f.Close()
 
-	uploaded, err := b.tgClient.Raw.UploadFile(b.tgCtx, f, b.config.DatabasePath, 512*1024)
+	up, err := ext.Upload(b.tgCtx, f, b.config.DatabasePath, 512*1024)
 	if err != nil {
 		b.logger.Printf("backup: upload error: %v", err)
 		return
 	}
 
 	media := &tg.InputMediaUploadedDocument{
-		File:       uploaded,
+		File:       up,
 		MimeType:   "application/x-sqlite3",
 		Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: fmt.Sprintf("base_%d.db", time.Now().Unix())}},
 	}
 
 	peer := b.tgCtx.PeerStorage.GetInputPeerById(b.logChannelID)
-	_, err = b.tgClient.Raw.MessagesSendMedia(b.tgCtx, &tg.MessagesSendMediaRequest{
+	_, err = b.tgCtx.SendMessage(b.logChannelID, &tg.MessagesSendMediaRequest{
 		Peer:    peer,
 		Media:   media,
 		Message: comment,
@@ -463,6 +463,7 @@ func (b *TelegramBot) uploadDBToLogChannel(comment string) {
 	}
 }
 
+// downloadDBFromLogChannel descarga la última copia del canal
 func downloadDBFromLogChannel(cfg *config.Configuration, log *logger.Logger) error {
 	tmpClient, err := gotgproto.NewClient(
 		cfg.ApiID,
@@ -483,20 +484,13 @@ func downloadDBFromLogChannel(cfg *config.Configuration, log *logger.Logger) err
 	ctx := tmpClient.CreateContext()
 	peer := ctx.PeerStorage.GetInputPeerById(logChannelID)
 
-	resp, err := tmpClient.Raw.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-		Peer:  peer,
-		Limit: 20,
-	})
+	hist, err := ctx.GetMessagesHistory(peer, 20)
 	if err != nil {
 		return fmt.Errorf("cannot fetch history: %w", err)
 	}
-	msgs, ok := resp.(*tg.MessagesMessagesSlice)
-	if !ok {
-		return fmt.Errorf("unexpected history type")
-	}
 
 	var lastDoc *tg.Message
-	for _, m := range msgs.Messages {
+	for _, m := range hist {
 		msg, ok := m.(*tg.Message)
 		if !ok || msg.Media == nil {
 			continue
@@ -512,7 +506,7 @@ func downloadDBFromLogChannel(cfg *config.Configuration, log *logger.Logger) err
 
 	media := lastDoc.Media.(*tg.MessageMediaDocument)
 	buf := &bytes.Buffer{}
-	if _, err := tmpClient.Raw.DownloadMedia(ctx, media, buf, &ext.DownloadMediaOpts{}); err != nil {
+	if _, err := ext.Download(ctx, media, buf, &ext.DownloadMediaOpts{}); err != nil {
 		return fmt.Errorf("download error: %w", err)
 	}
 
