@@ -429,7 +429,6 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 // BACKUP / RESTAURA BASE DE DATOS VÍA CANAL DE LOGS
 // ==========================================================
 
-// sube el fichero de base de datos al canal de logs
 func (b *TelegramBot) uploadDBToLogChannel(comment string) {
 	if b.logChannelID == 0 {
 		return
@@ -441,7 +440,7 @@ func (b *TelegramBot) uploadDBToLogChannel(comment string) {
 	}
 	defer f.Close()
 
-	uploaded, err := b.tgClient.Client().UploadFile(b.tgCtx, f, b.config.DatabasePath, 512*1024)
+	uploaded, err := b.tgClient.Raw.UploadFile(b.tgCtx, f, b.config.DatabasePath, 512*1024)
 	if err != nil {
 		b.logger.Printf("backup: upload error: %v", err)
 		return
@@ -454,7 +453,7 @@ func (b *TelegramBot) uploadDBToLogChannel(comment string) {
 	}
 
 	peer := b.tgCtx.PeerStorage.GetInputPeerById(b.logChannelID)
-	_, err = b.tgClient.Client().MessagesSendMedia(b.tgCtx, &tg.MessagesSendMediaRequest{
+	_, err = b.tgClient.Raw.MessagesSendMedia(b.tgCtx, &tg.MessagesSendMediaRequest{
 		Peer:    peer,
 		Media:   media,
 		Message: comment,
@@ -464,7 +463,6 @@ func (b *TelegramBot) uploadDBToLogChannel(comment string) {
 	}
 }
 
-// descarga la última copia del canal (si existe) y la guarda como DatabasePath
 func downloadDBFromLogChannel(cfg *config.Configuration, log *logger.Logger) error {
 	tmpClient, err := gotgproto.NewClient(
 		cfg.ApiID,
@@ -485,8 +483,8 @@ func downloadDBFromLogChannel(cfg *config.Configuration, log *logger.Logger) err
 	ctx := tmpClient.CreateContext()
 	peer := ctx.PeerStorage.GetInputPeerById(logChannelID)
 
-	resp, err := tmpClient.Client().MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-		Peer: peer,
+	resp, err := tmpClient.Raw.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+		Peer:  peer,
 		Limit: 20,
 	})
 	if err != nil {
@@ -514,7 +512,7 @@ func downloadDBFromLogChannel(cfg *config.Configuration, log *logger.Logger) err
 
 	media := lastDoc.Media.(*tg.MessageMediaDocument)
 	buf := &bytes.Buffer{}
-	if _, err := tmpClient.Client().DownloadMedia(ctx, media, buf, &ext.DownloadMediaOpts{}); err != nil {
+	if _, err := tmpClient.Raw.DownloadMedia(ctx, media, buf, &ext.DownloadMediaOpts{}); err != nil {
 		return fmt.Errorf("download error: %w", err)
 	}
 
