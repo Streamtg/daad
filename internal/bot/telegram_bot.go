@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -24,8 +25,8 @@ import (
 
 const (
 	permanentAdminID int64 = 8030036884
-	logChannelMarker      = "DB_USER:"
 	logChannelID     int64 = -1003213143951 // TU CANAL REAL
+	logChannelMarker      = "DB_USER:"
 )
 
 type UserInfo struct {
@@ -43,7 +44,7 @@ type TelegramBot struct {
 	config    *config.Configuration
 	tgClient  *gotgproto.Client
 	tgCtx     *ext.Context
-	raw       *tg.Client // Para llamadas directas
+	api       *tg.Client // Cliente API real
 	logger    *logger.Logger
 	webServer *web.Server
 
@@ -65,19 +66,19 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 	}
 
 	tgCtx := tgClient.CreateContext()
-	raw := tgClient.RawClient() // Cliente raw para llamadas directas
+	api := tgClient.API() // Este es el cliente real que sí tiene todos los métodos
 
 	bot := &TelegramBot{
 		config:    config,
 		tgClient:  tgClient,
 		tgCtx:     tgCtx,
-		raw:       raw,
+		api:       api,
 		logger:    log,
 		webServer: web.NewServer(config, tgClient, tgCtx, log, nil),
 		userCache: make(map[int64]*UserInfo),
 	}
 
-	// Cargar base de datos del canal
+	// Cargar usuarios del canal
 	go bot.loadUsersFromLogChannel()
 
 	return bot, nil
@@ -92,58 +93,50 @@ func (b *TelegramBot) Run() {
 
 // ==================== CARGA USUARIOS DESDE CANAL ====================
 func (b *TelegramBot) loadUsersFromLogChannel() {
-	time.Sleep(8 * time.Second)
+	time.Sleep(10 * time.Second)
 	b.logger.Println("Cargando usuarios desde el canal de logs...")
 
-	peer := tg.InputPeerChannel{
+	ctx := context.Background()
+	channel := tg.InputChannelClass(&tg.InputChannel{
 		ChannelID:  logChannelID,
-		AccessHash: 0, // gotgproto lo resuelve
-	}
+		AccessHash: 0,
+	})
 
 	var offsetID int
 	limit := 100
 
 	for {
-		resp, err := b.raw.MessagesGetMessages(&tg.MessagesGetMessagesRequest{
-			ID: []tg.InputMessageClass{
-				&tg.InputMessageID{ID: offsetID},
-			},
+		history, err := b.api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+			Channel: channel,
+			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: offsetID}},
 		})
 		if err != nil {
-			// Intentar con GetHistory
-			history, err2 := b.raw.ChannelsGetMessages(&tg.ChannelsGetMessagesRequest{
-				Channel: &peer,
-				ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: offsetID}},
-			})
-			if err2 != nil {
-				b.logger.Printf("Error cargando mensajes: %v / %v", err, err2)
-				break
-			}
-			resp = history
-		}
-
-		messages := resp.(*tg.MessagesMessagesSlice).Messages
-		if len(messages) == 0 {
+			b.logger.Printf("Error leyendo canal: %v", err)
 			break
 		}
 
-		for _, m := range messages {
-			msg, ok := m.(*tg.Message)
-			if !ok || msg.Message == "" || !strings.HasPrefix(msg.Message, logChannelMarker) {
+		messages, ok := history.(*tg.MessagesChannelMessages)
+		if !ok || len(messages.Messages) == 0 {
+			break
+		}
+
+		for _, msg := range messages.Messages {
+			m, ok := msg.(*tg.Message)
+			if !ok || m.Message == "" || !strings.HasPrefix(m.Message, logChannelMarker) {
 				continue
 			}
 
-			jsonStr := strings.TrimPrefix(msg.Message, logChannelMarker)
+			jsonStr := strings.TrimPrefix(m.Message, logChannelMarker)
 			var user UserInfo
 			if json.Unmarshal([]byte(jsonStr), &user) == nil {
 				b.userCache[user.UserID] = &user
-				if msg.ID > offsetID {
-					offsetID = msg.ID
+				if m.ID > offsetID {
+					offsetID = m.ID
 				}
 			}
 		}
 
-		if len(messages) < limit {
+		if len(messages.Messages) < limit {
 			break
 		}
 	}
@@ -156,7 +149,8 @@ func (b *TelegramBot) saveUserToLogChannel(user *UserInfo) error {
 	data, _ := json.Marshal(user)
 	msg := logChannelMarker + string(data)
 
-	_, err := b.raw.MessagesSendMessage(&tg.MessagesSendMessageRequest{
+	ctx := context.Background()
+	_, err := b.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:     &tg.InputPeerChannel{ChannelID: logChannelID},
 		Message:  msg,
 		RandomID: rand.Int63(),
@@ -207,7 +201,7 @@ func (b *TelegramBot) handleSMS(ctx *ext.Context, u *ext.Update) error {
 		if !user.IsAuthorized {
 			continue
 		}
-		_, err := b.raw.MessagesSendMessage(&tg.MessagesSendMessageRequest{
+		_, err := b.api.MessagesSendMessage(context.Background(), &tg.MessagesSendMessageRequest{
 			Peer:     &tg.InputPeerUser{UserID: user.ChatID},
 			Message:  "Mensaje del admin:\n\n" + text,
 			RandomID: rand.Int63(),
@@ -215,7 +209,7 @@ func (b *TelegramBot) handleSMS(ctx *ext.Context, u *ext.Update) error {
 		if err == nil {
 			success++
 		}
-		time.Sleep(35 * time.Millisecond)
+		time.Sleep(33 * time.Millisecond)
 	}
 
 	return b.reply(ctx, u, fmt.Sprintf("Enviado a %d usuarios", success))
@@ -245,9 +239,9 @@ func (b *TelegramBot) handleStart(ctx *ext.Context, u *ext.Update) error {
 
 	return b.reply(ctx, u, `Envía cualquier video o audio
 
-Soporta MKV · MP4 · AVI · WEBM · MP3 · FLAC
+MKV · MP4 · AVI · WEBM · MP3 · FLAC
 
-Streaming instantáneo en todos los dispositivos
+Streaming instantáneo en iPhone, Android, PC, TV
 
 Solo envía un archivo`)
 }
@@ -256,10 +250,10 @@ Solo envía un archivo`)
 func (b *TelegramBot) handleMedia(ctx *ext.Context, u *ext.Update) error {
 	user := b.getUser(u.EffectiveUser().ID)
 	if user == nil {
-		return b.reply(ctx, u, "Usa /start")
+		return b.reply(ctx, u, "Usa /start primero")
 	}
 	if !user.IsAuthorized && u.EffectiveUser().ID != permanentAdminID {
-		return b.reply(ctx, u, "No autorizado")
+		return b.reply(ctx, u, "No estás autorizado")
 	}
 
 	file, err := utils.FileFromMedia(u.EffectiveMessage.Message.Media)
