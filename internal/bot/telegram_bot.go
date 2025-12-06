@@ -20,13 +20,13 @@ import (
 	"github.com/celestix/gotgproto"
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/dispatcher/handlers/filters"
-	"github.com/celestix/gotgproto/ext"
+	"github.com/celestix/ gotgproto/ext"
 	"github.com/celestix/gotgproto/sessionMaker"
 	"github.com/glebarez/sqlite"
 	"github.com/gotd/td/tg"
 )
 
-const permanentAdminID int64 = 8030036884 // TU ID
+const permanentAdminID int64 = 8030036884
 
 type TelegramBot struct {
 	config         *config.Configuration
@@ -35,9 +35,10 @@ type TelegramBot struct {
 	logger         *logger.Logger
 	userRepository *data.UserRepository
 	db             *sql.DB
+	*sql.DB
 	webServer      *web.Server
 
-	logChannelPeer tg.InputPeerClass // ahora usamos el mismo canal para logs + backup
+	logChannelPeer tg.InputPeerClass // mismo canal para logs + backup
 }
 
 func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
@@ -80,11 +81,12 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 		webServer:      webServer,
 	}
 
-	// Usamos el mismo LogChannelID como canal de backup (no necesitas DBChannelID)
 	if config.LogChannelID != "" && config.LogChannelID != "0" {
-		if id, err := strconv.ParseInt(config.LogChannelID, 10, 64); err == nil {
+		if _, err := strconv.ParseInt(config.LogChannelID, 10, 64); err == nil {
 			peer, err := tgCtx.ResolvePeer(config.LogChannelID)
 			if err == nil {
+				log.Printf("Warning: No se pudo resolver el canal de logs: %v", err)
+			} else {
 				bot.logChannelPeer = peer
 				log.Printf("Canal de logs y backup configurado: %s", config.LogChannelID)
 			}
@@ -98,7 +100,6 @@ func (b *TelegramBot) Run() {
 	b.logger.Printf("Starting Telegram bot (@%s)...\n", b.tgClient.Self.Username)
 	b.registerHandlers()
 
-	// Al iniciar sincronizamos usuarios desde el canal (si está configurado)
 	if b.logChannelPeer != nil {
 		go b.syncUsersFromLogChannel()
 	}
@@ -121,8 +122,7 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 }
 
-/* ==================== COMANDOS EXACTOS COMO LOS TENÍAS ==================== */
-
+// ==================== /start ====================
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -162,6 +162,7 @@ Support: @Wavetouch_bot`
 	return b.sendReply(ctx, u, welcome)
 }
 
+// ==================== /ban ====================
 func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -184,11 +185,12 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if err := b.userRepository.DeauthorizeUser(targetID); err != nil {
 		return b.sendReply(ctx, u, "Failed to ban user.")
 	}
-	b.logger.Printf("ADMIN %d banned user %d – Reason: %s", permanentAdminID, targetID, reason)
-	go b.notifyUser(targetID, fmt.Sprintf("You have been permanently banned from using this bot.\nReason: %s", reason))
+	b.logger.Printf("ADMIN %d banned user %d – %s", permanentAdminID, targetID, reason)
+	go b.notifyUser(targetID, fmt.Sprintf("You have been permanently banned.\nReason: %s", reason))
 	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nReason: %s", targetID, reason))
 }
 
+// ==================== /unban ====================
 func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
@@ -205,6 +207,7 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been unbanned.", targetID))
 }
 
+// ==================== /listusers ====================
 func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
@@ -224,6 +227,7 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	offset := (page - 1) * pageSize
 	users, _ := b.userRepository.GetAllUsers(offset, pageSize)
 	if len(users) == 0 {
+	{
 		return b.sendReply(ctx, u, "No users on this page.")
 	}
 	var msg strings.Builder
@@ -249,6 +253,7 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	return b.sendReply(ctx, u, msg.String())
 }
 
+// ==================== /userinfo ====================
 func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
@@ -266,10 +271,6 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	if !target.IsAuthorized {
 		status = "Banned"
 	}
-	adminStatus := "No"
-	if target.IsAdmin {
-		adminStatus = "Yes"
-	}
 	username := target.Username
 	if username == "" {
 		username = "N/A"
@@ -279,14 +280,14 @@ ID: <code>%d</code>
 Name: %s %s
 Username: @%s
 Status: %s
-Admin: %s
 Files sent: %d
 Last active: %s`,
-		target.UserID, target.FirstName, target.LastName, username, status, adminStatus,
+		target.UserID, target.FirstName, target.LastName, username, status,
 		target.FilesSent, time.Unix(target.LastActive, 0).Format("02/01/2006 15:04"))
 	return b.sendReply(ctx, u, msg)
 }
 
+// ==================== /sms ====================
 func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -312,12 +313,10 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 		}
 		time.Sleep(33 * time.Millisecond)
 	}
-	}
 	return b.sendReply(ctx, u, fmt.Sprintf("Mensaje enviado a %d usuarios.", success))
 }
 
-/* ==================== MEDIA + LOGS + BACKUP EN EL MISMO CANAL ==================== */
-
+// ==================== handleMediaMessages ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -325,13 +324,13 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 		return b.sendReply(ctx, u, "You are not authorized to use this bot.")
 	}
 
-	// Actualizamos estadísticas
+	// Actualizar estadísticas
 	b.userRepository.UpdateUserStats(userID, userInfo.FilesSent+1, time.Now().Unix())
 
-	// Backup en el canal (misma línea que los logs)
+	// Guardar backup en el canal
 	b.saveUserToChannel(userID, userInfo)
 
-	// Forward + info al canal
+	// Enviar al canal de logs
 	b.forwardMediaToLogChannel(ctx, u, userInfo)
 
 	file, err := utils.FileFromMedia(u.EffectiveMessage.Message.Media)
@@ -348,13 +347,12 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 	return b.sendMediaToUser(ctx, u, fileURL, file, false)
 }
 
+// ==================== Canal de logs + backup ====================
 func (b *TelegramBot) forwardMediaToLogChannel(ctx *ext.Context, u *ext.Update, userInfo *data.User) {
 	if b.logChannelPeer == nil {
 		return
 	}
-
 	go func() {
-		// Forward del archivo
 		updates, _ := utils.ForwardMessages(ctx, u.EffectiveChat().GetID(), b.config.LogChannelID, u.EffectiveMessage.Message.ID)
 		var forwardedID int
 		for _, upd := range updates.GetUpdates() {
@@ -370,10 +368,10 @@ func (b *TelegramBot) forwardMediaToLogChannel(ctx *ext.Context, u *ext.Update, 
 		}
 
 		username := userInfo.Username
-		if username == "" {
-			username = "N/A"
-		} else {
+		if username != "" {
 			username = "@" + username
+	} else {
+			username = "N/A"
 		}
 
 		info := fmt.Sprintf("Archivo recibido\nUsuario: %s %s\nUsername: %s\nID: <code>%d</code>\nArchivos enviados: %d",
@@ -392,7 +390,7 @@ func (b *TelegramBot) saveUserToChannel(userID int64, user *data.User) {
 	if b.logChannelPeer == nil {
 		return
 	}
-	msg := fmt.Sprintf("USER_BACKUP_v1\nID:%d\nNAME:%s %s\nUSER:%s\nFILES:%d\nLAST:%d",
+	msg := fmt.Sprintf("USER_BACKUP\nID:%d\nNAME:%s %s\nUSER:%s\nFILES:%d\nLAST:%d",
 		userID, user.FirstName, user.LastName, user.Username, user.FilesSent+1, time.Now().Unix())
 	go b.tgCtx.SendMessage(0, &tg.MessagesSendMessageRequest{
 		Peer:     b.logChannelPeer,
@@ -402,11 +400,10 @@ func (b *TelegramBot) saveUserToChannel(userID int64, user *data.User) {
 }
 
 func (b *TelegramBot) syncUsersFromLogChannel() {
-	// implementación opcional (puedes dejarla vacía si no quieres sincronizar al inicio)
+	// Puedes dejarlo vacío o implementarlo más adelante
 }
 
-/* ==================== RESPUESTA CON BOTÓN STREAMING ==================== */
-
+// ==================== Respuesta con botón STREAMING ====================
 func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
 	keyboard := []tg.KeyboardButtonRow{
 		{Buttons: []tg.KeyboardButtonClass{&tg.KeyboardButtonURL{Text: "STREAMING", URL: fileURL}}},
@@ -416,7 +413,7 @@ func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL s
 		Markup: &tg.ReplyInlineMarkup{Rows: keyboard},
 	})
 	if err != nil {
-		b.logger.Printf("Failed to send media reply: %v", err)
+		b.logger.Printf("Failed to send reply: %v", err)
 	}
 
 	wsMsg := b.constructWebSocketMessage(fileURL, file)
