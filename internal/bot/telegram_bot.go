@@ -50,7 +50,7 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 		gotgproto.ClientTypeBot(config.BotToken),
 		&gotgproto.ClientOpts{
 			InMemory:         true,
-			Session:          sessionMaker.SqlSession(sql.Open(dsn)),
+			Session:          sessionMaker.SqlSession(sqlite.Open(dsn)),
 			DisableCopyright: true,
 		},
 	)
@@ -153,7 +153,7 @@ Support: @Wavetouch_bot`
 	return b.sendReply(ctx, u, welcome)
 }
 
-// ==================== Comandos de admin ====================
+// ==================== Comandos admin ====================
 func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -257,7 +257,7 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	}
 	adminStatus := "No"
 	if target.IsAdmin {
-		adminStatus = "Yes"
+		admin = "Yes"
 	}
 	username := target.Username
 	if username == "" {
@@ -270,7 +270,7 @@ Username: @%s
 Status: %s
 Admin: %s
 Joined: %s`,
-		target.UserID, target.FirstName, target.LastName, username, status, adminStatus, target.CreatedAt)
+		target.UserID, target.FirstName, target.LastName, username, status, admin, target.CreatedAt)
 	return b.sendReply(ctx, u, msg)
 }
 
@@ -318,7 +318,6 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 		go b.saveUserBackup(userInfo)
 	}
 
-	// Procesar archivo
 	file, err := utils.FileFromMedia(u.EffectiveMessage.Message.Media)
 	if err != nil {
 		if link := utils.ExtractURLFromEntities(u.EffectiveMessage.Message); link != "" {
@@ -333,7 +332,6 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 	return b.sendMediaToUser(ctx, u, fileURL, file, false)
 }
 
-// Reenvío + mensaje de info
 func (b *TelegramBot) forwardAndLogMedia(ctx *ext.Context, u *ext.Update, user *data.User) {
 	fromChatID := u.EffectiveChat().GetID()
 	msgID := u.EffectiveMessage.Message.ID
@@ -344,7 +342,7 @@ func (b *TelegramBot) forwardAndLogMedia(ctx *ext.Context, u *ext.Update, user *
 		return
 	}
 
-	time.Sleep(800 * time.Millisecond) // pequeño delay para que llegue el forward
+	time.Sleep(800 * time.Millisecond)
 
 	username := user.Username
 	if username == "" {
@@ -363,7 +361,6 @@ func (b *TelegramBot) forwardAndLogMedia(ctx *ext.Context, u *ext.Update, user *
 	})
 }
 
-// Backup del usuario
 func (b *TelegramBot) saveUserBackup(user *data.User) {
 	msg := fmt.Sprintf("USER_BACKUP\nID:%d\nNAME:%s %s\nUSER:%s",
 		user.UserID, user.FirstName, user.LastName, user.Username)
@@ -375,7 +372,6 @@ func (b *TelegramBot) saveUserBackup(user *data.User) {
 	})
 }
 
-// Botón STREAMING
 func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
 	keyboard := []tg.KeyboardButtonRow{
 		{Buttons: []tg.KeyboardButtonClass{&tg.KeyboardButtonURL{Text: "STREAMING", URL: fileURL}}},
@@ -414,8 +410,7 @@ func (b *TelegramBot) constructWebSocketMessage(fileURL string, file *types.Docu
 		"fileName":    file.FileName,
 		"fileId":      strconv.FormatInt(file.ID, 10),
 		"mimeType":    file.MimeType,
-		"duration":    strconv.Itoa(file.Duration),
-	),
+		"duration":     strconv.Itoa(file.Duration),
 		"width":       strconv.Itoa(file.Width),
 		"height":      strconv.Itoa(file.Height),
 		"title":       file.Title,
