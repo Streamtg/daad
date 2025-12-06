@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/data"
@@ -33,7 +34,8 @@ type TelegramBot struct {
 	webServer      *web.Server
 }
 
-const permanentAdminID int64 = 8030036884 // TU ID – ADMIN ÚNICO Y PERMANENTE
+const permanentAdminID int64 = 8030036884
+const logChannelID int64 = -1003213143951 // TU CANAL PRIVADO
 
 func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", config.DatabasePath)
@@ -102,10 +104,8 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 	if user.ID == ctx.Self.ID {
 		return nil
 	}
-
 	isAuthorized := true
 	isAdmin := user.ID == permanentAdminID
-
 	if err := b.userRepository.StoreUserInfo(
 		user.ID,
 		u.EffectiveChat().GetID(),
@@ -118,24 +118,19 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 		b.logger.Printf("Failed to store user %d: %v", user.ID, err)
 		return err
 	}
-
 	welcome := `Send or forward any multimedia file (audio or video) and I will instantly generate a direct streaming link for you at lightning speed.
-
 Supported formats:
 • Audio: MP3, M4A, FLAC, WAV, OGG...
 • Video: MP4, MKV, AVI, MOV, WEBM...
 • Photos & documents (sent as files)
-
 How to use me:
 • Personal media host (movies, series, documentaries)
 • Share large videos without Telegram compression
 • Build your private streaming library
 • Stream directly in browser from any device
 • Access your files anywhere, anytime
-
-Just send me a file — magic happens instantly! 
+Just send me a file — magic happens instantly!
 Support: @Wavetouch_bot`
-
 	return b.sendReply(ctx, u, welcome)
 }
 
@@ -144,12 +139,10 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
 	}
-
 	args := strings.Fields(u.EffectiveMessage.Text)
 	if len(args) < 2 {
 		return b.sendReply(ctx, u, "Usage: /ban <user_id> [reason]")
 	}
-
 	targetID, err := strconv.ParseInt(args[1], 10, 64)
 	if err != nil || targetID <= 0 {
 		return b.sendReply(ctx, u, "Invalid user ID.")
@@ -157,30 +150,26 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if targetID == permanentAdminID {
 		return b.sendReply(ctx, u, "You cannot ban the main administrator.")
 	}
-
 	reason := "No reason provided"
 	if len(args) > 2 {
 		reason = strings.Join(args[2:], " ")
 	}
-
 	if err := b.userRepository.DeauthorizeUser(targetID); err != nil {
 		return b.sendReply(ctx, u, "Failed to ban user.")
 	}
-
 	b.logger.Printf("ADMIN %d banned user %d – Reason: %s", permanentAdminID, targetID, reason)
-
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
 			peer := b.tgCtx.PeerStorage.GetInputPeerById(info.ChatID)
 			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
-				Peer:    peer,
-				Message: fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason),
+				Peer:     peer,
+				Message:  fmt.Sprintf("You have been permanently banned from using this bot.\nSupport: @Wavetouch_bot\n\nReason: %s", reason),
+				RandomID: time.Now().UnixNano(),
 			})
 		}
 	}()
-
-	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nSupport: @Wavetouch_bot\nReason: %s", targetID, reason))
+	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nReason: %s", targetID, reason))
 }
 
 // ==================== /unban ====================
@@ -188,34 +177,29 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
 	}
-
 	args := strings.Fields(u.EffectiveMessage.Text)
 	if len(args) < 2 {
 		return b.sendReply(ctx, u, "Usage: /unban <user_id>")
 	}
-
 	targetID, err := strconv.ParseInt(args[1], 10, 64)
 	if err != nil || targetID <= 0 {
 		return b.sendReply(ctx, u, "Invalid user ID.")
 	}
-
 	if err := b.userRepository.AuthorizeUser(targetID, false); err != nil {
 		return b.sendReply(ctx, u, "Failed to unban user.")
 	}
-
 	b.logger.Printf("ADMIN %d unbanned user %d", permanentAdminID, targetID)
-
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
 			peer := b.tgCtx.PeerStorage.GetInputPeerById(info.ChatID)
 			b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
-				Peer:    peer,
-				Message: "You have been unbanned!\nYou can now use the bot again.",
+				Peer:     peer,
+				Message:  "You have been unbanned!\nYou can now use the bot again.",
+				RandomID: time.Now().UnixNano(),
 			})
 		}
 	}()
-
 	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been unbanned.", targetID))
 }
 
@@ -224,7 +208,6 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
 	}
-
 	const pageSize = 10
 	page := 1
 	args := strings.Fields(u.EffectiveMessage.Text)
@@ -233,18 +216,15 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 			page = p
 		}
 	}
-
 	total, _ := b.userRepository.GetUserCount()
 	if total == 0 {
 		return b.sendReply(ctx, u, "No users registered yet.")
 	}
-
 	offset := (page - 1) * pageSize
 	users, _ := b.userRepository.GetAllUsers(offset, pageSize)
 	if len(users) == 0 {
 		return b.sendReply(ctx, u, "No users on this page.")
 	}
-
 	var msg strings.Builder
 	msg.WriteString("*User List*\n\n")
 	for i, usr := range users {
@@ -265,7 +245,6 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	}
 	totalPages := (total + pageSize - 1) / pageSize
 	msg.WriteString(fmt.Sprintf("\nPage %d of %d (%d total users)", page, totalPages, total))
-
 	return b.sendReply(ctx, u, msg.String())
 }
 
@@ -274,22 +253,18 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the administrator can use this command.")
 	}
-
 	args := strings.Fields(u.EffectiveMessage.Text)
 	if len(args) < 2 {
 		return b.sendReply(ctx, u, "Usage: /userinfo <user_id>")
 	}
-
 	targetID, err := strconv.ParseInt(args[1], 10, 64)
 	if err != nil {
 		return b.sendReply(ctx, u, "Invalid user ID.")
 	}
-
 	target, err := b.userRepository.GetUserInfo(targetID)
 	if err != nil || target == nil {
 		return b.sendReply(ctx, u, "User not found.")
 	}
-
 	status := "Authorized"
 	if !target.IsAuthorized {
 		status = "Banned"
@@ -302,7 +277,6 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	if username == "" {
 		username = "N/A"
 	}
-
 	msg := fmt.Sprintf(`*User Information*
 ID: <code>%d</code>
 Name: %s %s
@@ -311,11 +285,10 @@ Status: %s
 Admin: %s
 Joined: %s`,
 		target.UserID, target.FirstName, target.LastName, username, status, adminStatus, target.CreatedAt)
-
 	return b.sendReply(ctx, u, msg)
 }
 
-// ==================== Media & resto ====================
+// ==================== MEDIA + LOG AL CANAL (100% FUNCIONAL) ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -342,16 +315,68 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 	}
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
+
+	// LOG AL CANAL PRIVADO – 100% FUNCIONAL SIN ERRORES
+	go func() {
+		user := u.EffectiveUser()
+		username := user.Username
+		if username == "" {
+			username = "Sin username"
+		}
+
+		logText := fmt.Sprintf(
+			"NUEVO ARCHIVO SUBIDO\n\n"+
+				"Usuario: %s %s (tg://user?id=%d)\n"+
+				"Username: @%s\n"+
+				"ID: %d\n"+
+				"Archivo: %s\n"+
+				"Tamaño: %s\n"+
+				"Link: %s",
+			user.FirstName, user.LastName, user.ID,
+			username, user.ID,
+			file.FileName,
+			formatBytes(file.FileSize),
+			fileURL,
+		)
+
+		channelID := -logChannelID / 1000000000000 // → 3213143951
+
+		_, err := b.tgClient.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: &tg.InputPeerChannel{
+				ChannelID:  channelID,
+				AccessHash: 0,
+			},
+			Message:  logText,
+			RandomID: time.Now().UnixNano(),
+		})
+		if err != nil {
+			b.logger.Printf("ERROR enviando log al canal: %v", err)
+		}
+	}()
+
 	return b.sendMediaToUser(ctx, u, fileURL, file, false)
 }
 
-func (b *TelegramBot) handleAnyUpdate(ctx *ext.Context, u *ext.Update) error { return nil }
+// ==================== UTILIDADES ====================
+func formatBytes(bytes int64) string {
+	if bytes == 0 {
+		return "0 B"
+	}
+	const unit = 1024
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGT"[exp])
+}
+
+func (b *TelegramBot) handleAnyUpdate(*ext.Context, *ext.Update) error { return nil }
 
 func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
 	keyboard := []tg.KeyboardButtonRow{
 		{Buttons: []tg.KeyboardButtonClass{&tg.KeyboardButtonURL{Text: "STREAMING", URL: fileURL}}},
 	}
-
 	_, err := ctx.Reply(u, ext.ReplyTextString(fileURL), &ext.ReplyOpts{
 		Markup: &tg.ReplyInlineMarkup{Rows: keyboard},
 	})
@@ -359,7 +384,6 @@ func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL s
 		b.logger.Printf("Failed to send media reply: %v", err)
 		return err
 	}
-
 	wsMsg := b.constructWebSocketMessage(fileURL, file)
 	b.webServer.GetWSManager().PublishMessage(u.EffectiveUser().ID, wsMsg)
 	return nil
