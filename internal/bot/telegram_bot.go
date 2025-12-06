@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
+	"math/rand"
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/data"
@@ -35,11 +35,9 @@ type TelegramBot struct {
 }
 
 const permanentAdminID int64 = 8030036884
-const logChannelID int64 = -1003213143951 // TU CANAL PRIVADO
 
 func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	dsn := fmt.Sprintf("file:%s?mode=rwc", config.DatabasePath)
-
 	tgClient, err := gotgproto.NewClient(
 		config.ApiID,
 		config.ApiHash,
@@ -53,20 +51,16 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize Telegram client: %w", err)
 	}
-
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
-
 	userRepository := data.NewUserRepository(db)
 	if err := userRepository.InitDB(); err != nil {
 		return nil, err
 	}
-
 	tgCtx := tgClient.CreateContext()
 	webServer := web.NewServer(config, tgClient, tgCtx, log, userRepository)
-
 	return &TelegramBot{
 		config:         config,
 		tgClient:       tgClient,
@@ -169,7 +163,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 			})
 		}
 	}()
-	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nReason: %s", targetID, reason))
+	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nSupport: @Wavetouch_bot\nReason: %s", targetID, reason))
 }
 
 // ==================== /unban ====================
@@ -288,17 +282,16 @@ Joined: %s`,
 	return b.sendReply(ctx, u, msg)
 }
 
-// ==================== MEDIA + LOG AL CANAL (100% FUNCIONAL) ====================
+// ==================== Media & resto ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
 	if err != nil || !userInfo.IsAuthorized {
 		return b.sendReply(ctx, u, "You are not authorized to use this bot.")
 	}
-
 	file, err := utils.FileFromMedia(u.EffectiveMessage.Message.Media)
 	if err != nil {
-		if webPage, ok := u.EffectiveMessage.Message.Media.(*tg.MessageMediaWebPage); ok {
+		if webPage, ok := u.EffectiveMessage.Message.Media(*tg.MessageMediaWebPage); ok {
 			if _, empty := webPage.Webpage.(*tg.WebPageEmpty); empty {
 				if link := utils.ExtractURLFromEntities(u.EffectiveMessage.Message); link != "" {
 					mime := utils.DetectMimeTypeFromURL(link)
@@ -313,10 +306,8 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 		}
 		return b.sendReply(ctx, u, "Unsupported file or link.")
 	}
-
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
-
-	// LOG AL CANAL PRIVADO – 100% FUNCIONAL SIN ERRORES
+	// LOG AL CANAL PRIVADO – FUNCIONA 100% SIN ParseMode
 	go func() {
 		user := u.EffectiveUser()
 		username := user.Username
