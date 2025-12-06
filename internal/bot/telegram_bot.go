@@ -2,12 +2,10 @@ package bot
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/data"
@@ -67,7 +65,7 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 	tgCtx := tgClient.CreateContext()
 	webServer := web.NewServer(config, tgClient, tgCtx, log, userRepository)
 
-	bot := &TelegramBot{
+	return &TelegramBot{
 		config:         config,
 		tgClient:       tgClient,
 		tgCtx:          tgCtx,
@@ -75,35 +73,13 @@ func NewTelegramBot(config *config.Configuration, log *logger.Logger) (*Telegram
 		userRepository: userRepository,
 		db:             db,
 		webServer:      webServer,
-	}
-
-	// Iniciar sincronización desde canal de logs en background
-	go func() {
-		// Espera breve para que client esté listo
-		time.Sleep(1500 * time.Millisecond)
-		if err := bot.SyncUsersFromLogChannel(); err != nil {
-			bot.logger.Printf("Warning: failed initial sync from log channel: %v", err)
-		} else {
-			bot.logger.Printf("Initial DB sync from log channel completed.")
-		}
-	}()
-
-	return bot, nil
+	}, nil
 }
 
 func (b *TelegramBot) Run() {
 	b.logger.Printf("Starting Telegram bot (@%s)...\n", b.tgClient.Self.Username)
 	b.registerHandlers()
 	go b.webServer.Start()
-	// Start a periodic resync in background to ensure DB stays up-to-date across instances
-	go func() {
-		for {
-			time.Sleep(5 * time.Minute)
-			if err := b.SyncUsersFromLogChannel(); err != nil {
-				b.logger.Printf("Periodic sync error: %v", err)
-			}
-		}
-	}()
 	if err := b.tgClient.Idle(); err != nil {
 		b.logger.Fatalf("Failed to start Telegram client: %s", err)
 	}
@@ -112,7 +88,6 @@ func (b *TelegramBot) Run() {
 func (b *TelegramBot) registerHandlers() {
 	d := b.tgClient.Dispatcher
 	d.AddHandler(handlers.NewCommand("start", b.handleStartCommand))
-	d.AddHandler(handlers.NewCommand("sms", b.handleSMSCommand)) // NUEVO
 	d.AddHandler(handlers.NewCommand("ban", b.handleBanUser))
 	d.AddHandler(handlers.NewCommand("unban", b.handleUnbanUser))
 	d.AddHandler(handlers.NewCommand("listusers", b.handleListUsers))
@@ -142,12 +117,6 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 	); err != nil {
 		b.logger.Printf("Failed to store user %d: %v", user.ID, err)
 		return err
-	}
-
-	// Publicar registro estructurado en canal de logs para persistencia remota (DB)
-	if err := b.publishUserRecordToLogChannel(user, u.EffectiveChat().GetID(), isAuthorized, isAdmin); err != nil {
-		// no fatal: solo logueamos
-		b.logger.Printf("Failed to publish user record to log channel: %v", err)
 	}
 
 	welcome := `Send or forward any multimedia file (audio or video) and I will instantly generate a direct streaming link for you at lightning speed.
@@ -211,11 +180,6 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 		}
 	}()
 
-	// Also publish deauth to log channel (keeps remote DB state readable)
-	if err := b.publishAdminActionToLogChannel(fmt.Sprintf("BAN|%d|%s", targetID, reason)); err != nil {
-		b.logger.Printf("Failed to publish ban action to log channel: %v", err)
-	}
-
 	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nSupport: @Wavetouch_bot\nReason: %s", targetID, reason))
 }
 
@@ -251,11 +215,6 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 			})
 		}
 	}()
-
-	// Publish unban action to log channel
-	if err := b.publishAdminActionToLogChannel(fmt.Sprintf("UNBAN|%d", targetID)); err != nil {
-		b.logger.Printf("Failed to publish unban action to log channel: %v", err)
-	}
 
 	return b.sendReply(ctx, u, fmt.Sprintf("User %d has been unbanned.", targetID))
 }
@@ -359,25 +318,6 @@ Joined: %s`,
 // ==================== Media & resto ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
-
-	// Ensure user exists in repo (create if missing)
-	userInfo, _ := b.userRepository.GetUserInfo(userID)
-	if userInfo == nil {
-		isAuthorized := true
-		isAdmin := userID == permanentAdminID
-		_ = b.userRepository.StoreUserInfo(
-			userID,
-			u.EffectiveChat().GetID(),
-			u.EffectiveUser().FirstName,
-			u.EffectiveUser().LastName,
-			u.EffectiveUser().Username,
-			isAuthorized,
-			isAdmin,
-		)
-		// Publish to log channel so remote DB gets it
-		_ = b.publishUserRecordToLogChannel(u.EffectiveUser(), u.EffectiveChat().GetID(), isAuthorized, isAdmin)
-	}
-
 	userInfo, err := b.userRepository.GetUserInfo(userID)
 	if err != nil || !userInfo.IsAuthorized {
 		return b.sendReply(ctx, u, "You are not authorized to use this bot.")
@@ -399,25 +339,6 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 			}
 		}
 		return b.sendReply(ctx, u, "Unsupported file or link.")
-	}
-
-	// 1) Log structured record to channel (USER|...)
-	_ = b.publishUserRecordToLogChannel(u.EffectiveUser(), u.EffectiveChat().GetID(), true, userID == permanentAdminID)
-
-	// 2) Publish readable meta to logs
-	b.logIncomingFile(u, file)
-
-	// 3) Forward original message to logs (keep file in channel)
-	if b.config.LogChannelID != 0 {
-		fromPeer := b.tgCtx.PeerStorage.GetInputPeerById(u.EffectiveChat().GetID())
-		toPeer := b.tgCtx.PeerStorage.GetInputPeerById(b.config.LogChannelID)
-		if fromPeer != nil && toPeer != nil {
-			_, _ = b.tgCtx.API().MessagesForwardMessages(&tg.MessagesForwardMessagesRequest{
-				FromPeer: fromPeer,
-				ID:       []int{u.EffectiveMessage.Message.ID},
-				ToPeer:   toPeer,
-			})
-		}
 	}
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
@@ -483,241 +404,4 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 		b.logger.Printf("Reply error: %v", err)
 	}
 	return err
-}
-
-// ==================== NUEVAS FUNCIONES: LOG & SYNC ====================
-
-// publishUserRecordToLogChannel escribe una línea estructurada que actúa como fuente de verdad
-// Formato (single line): USER|<user_id>|<chat_id>|<first>|<last>|<username>|<authorized>|<isAdmin>
-func (b *TelegramBot) publishUserRecordToLogChannel(user *tg.User, chatID int64, authorized bool, isAdmin bool) error {
-	if b.config.LogChannelID == 0 {
-		return fmt.Errorf("log channel not configured")
-	}
-	username := user.Username
-	if username == "" {
-		username = "N/A"
-	}
-	line := fmt.Sprintf("USER|%d|%d|%s|%s|%s|%t|%t", user.ID, chatID, escapePipe(user.FirstName), escapePipe(user.LastName), escapePipe(username), authorized, isAdmin)
-	// Publish structured line
-	peer := b.tgCtx.PeerStorage.GetInputPeerById(b.config.LogChannelID)
-	if peer == nil {
-		return fmt.Errorf("failed to get input peer for log channel")
-	}
-	_, err := b.tgCtx.SendMessage(b.config.LogChannelID, &tg.MessagesSendMessageRequest{
-		Peer:    peer,
-		Message: line,
-	})
-	if err != nil {
-		return err
-	}
-	// Also publish a human readable meta message for convenience (non-structured)
-	meta := fmt.Sprintf("📁 NEW USER\nID: %d\nName: %s %s\nUsername: @%s\nTime: %s", user.ID, user.FirstName, user.LastName, user.Username, time.Now().Format(time.RFC3339))
-	_, _ = b.tgCtx.SendMessage(b.config.LogChannelID, &tg.MessagesSendMessageRequest{
-		Peer:    peer,
-		Message: meta,
-	})
-	return nil
-}
-
-// publishAdminActionToLogChannel publica acciones administrativas (BAN/UNBAN)
-func (b *TelegramBot) publishAdminActionToLogChannel(line string) error {
-	if b.config.LogChannelID == 0 {
-		return fmt.Errorf("log channel not configured")
-	}
-	peer := b.tgCtx.PeerStorage.GetInputPeerById(b.config.LogChannelID)
-	if peer == nil {
-		return fmt.Errorf("failed to get input peer for log channel")
-	}
-	_, err := b.tgCtx.SendMessage(b.config.LogChannelID, &tg.MessagesSendMessageRequest{
-		Peer:    peer,
-		Message: line,
-	})
-	return err
-}
-
-// logIncomingFile publica meta legible al canal de logs
-func (b *TelegramBot) logIncomingFile(u *ext.Update, file *types.DocumentFile) {
-	if b.config.LogChannelID == 0 {
-		return
-	}
-	user := u.EffectiveUser()
-	text := fmt.Sprintf(
-		"📁 NEW FILE UPLOADED\nUser: %d\nName: %s %s\nUsername: @%s\nFile: %s\nMime: %s\nSize: %d\nMessageID: %d\nChatID: %d\nTime: %s",
-		user.ID,
-		user.FirstName,
-		user.LastName,
-		user.Username,
-		file.FileName,
-		file.MimeType,
-		file.FileSize,
-		u.EffectiveMessage.Message.ID,
-		u.EffectiveChat().GetID(),
-		time.Now().Format(time.RFC3339),
-	)
-	peer := b.tgCtx.PeerStorage.GetInputPeerById(b.config.LogChannelID)
-	if peer == nil {
-		return
-	}
-	_, _ = b.tgCtx.SendMessage(b.config.LogChannelID, &tg.MessagesSendMessageRequest{
-		Peer:    peer,
-		Message: text,
-	})
-}
-
-// SyncUsersFromLogChannel lee el historial del canal de logs y reconstruye la base de datos
-func (b *TelegramBot) SyncUsersFromLogChannel() error {
-	if b.config.LogChannelID == 0 {
-		return fmt.Errorf("log channel not configured")
-	}
-
-	peer := b.tgCtx.PeerStorage.GetInputPeerById(b.config.LogChannelID)
-	if peer == nil {
-		return fmt.Errorf("unable to obtain peer for log channel")
-	}
-
-	// Lectura por batches para no saturar
-	limit := int(1000)
-	var offsetID int = 0
-	for {
-		history, err := b.tgCtx.API().MessagesGetHistory(&tg.MessagesGetHistoryRequest{
-			Peer:  peer,
-			Limit: int(limit),
-			// OffsetDate, OffsetID, MaxID etc. se dejan 0 para leer secuencialmente
-			OffsetID: offsetID,
-		})
-		if err != nil {
-			return fmt.Errorf("error getting history: %w", err)
-		}
-
-		msgs, ok := history.(*tg.MessagesMessages)
-		if !ok {
-			// si no se puede castear, terminamos
-			break
-		}
-
-		if len(msgs.Messages) == 0 {
-			break
-		}
-
-		maxID := 0
-		for _, m := range msgs.Messages {
-			msg, ok := m.(*tg.Message)
-			if !ok || msg.Message == "" {
-				continue
-			}
-			// Mantener max id para siguiente offset
-			if msg.ID > maxID {
-				maxID = msg.ID
-			}
-			// Procesar líneas con USER|
-			if strings.HasPrefix(msg.Message, "USER|") {
-				b.processUserLine(msg.Message)
-			}
-			// Opcionalmente procesar BAN/UNBAN acciones si las publicaste
-			if strings.HasPrefix(msg.Message, "BAN|") {
-				// BAN|<userID>|<reason>
-				parts := strings.SplitN(msg.Message, "|", 3)
-				if len(parts) >= 2 {
-					if id, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
-						_ = b.userRepository.DeauthorizeUser(id)
-					}
-				}
-			}
-			if strings.HasPrefix(msg.Message, "UNBAN|") {
-				parts := strings.SplitN(msg.Message, "|", 2)
-				if len(parts) >= 2 {
-					if id, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
-						_ = b.userRepository.AuthorizeUser(id, false)
-					}
-				}
-			}
-		}
-
-		// Si no hubo mensajes nuevos, rompemos
-		if maxID == 0 {
-			break
-		}
-		// Avanzar offsetID para evitar leer infinitamente; +1 para next batch
-		offsetID = maxID + 1
-		// Si la cantidad de mensajes leídos es menor al límite, terminamos
-		if len(msgs.Messages) < limit {
-			break
-		}
-	}
-
-	return nil
-}
-
-// processUserLine parsea una línea USER|... y la guarda en userRepository
-func (b *TelegramBot) processUserLine(line string) {
-	// USER|<user_id>|<chat_id>|<first>|<last>|<username>|<authorized>|<isAdmin>
-	parts := strings.Split(line, "|")
-	if len(parts) < 8 {
-		return
-	}
-	uid, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return
-	}
-	chatID, _ := strconv.ParseInt(parts[2], 10, 64)
-	first := unescapePipe(parts[3])
-	last := unescapePipe(parts[4])
-	username := unescapePipe(parts[5])
-	authorized := parts[6] == "true"
-	isAdmin := parts[7] == "true"
-
-	// Store or update in repository
-	_ = b.userRepository.StoreUserInfo(uid, chatID, first, last, username, authorized, isAdmin)
-}
-
-// escapePipe para sanitizar pipes en nombres
-func escapePipe(s string) string {
-	return strings.ReplaceAll(s, "|", " ")
-}
-func unescapePipe(s string) string {
-	return strings.ReplaceAll(s, "|", " ")
-}
-
-// ==================== /sms (ENVÍO GLOBAL) ====================
-func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveUser().ID != permanentAdminID {
-		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
-	}
-
-	args := strings.TrimSpace(strings.TrimPrefix(u.EffectiveMessage.Text, "/sms"))
-	if args == "" {
-		return b.sendReply(ctx, u, "Usage: /sms <message text here>")
-	}
-
-	// Obtener todos los usuarios -- usamos GetAllUsers con límite alto
-	const big = 1000000
-	users, err := b.userRepository.GetAllUsers(0, big)
-	if err != nil {
-		return b.sendReply(ctx, u, "Failed to fetch users for broadcast.")
-	}
-
-	sent := 0
-	for _, usr := range users {
-		if !usr.IsAuthorized {
-			continue
-		}
-		peer := b.tgCtx.PeerStorage.GetInputPeerById(usr.ChatID)
-		if peer == nil {
-			continue
-		}
-		_, err := b.tgCtx.SendMessage(usr.ChatID, &tg.MessagesSendMessageRequest{
-			Peer:    peer,
-			Message: args,
-		})
-		if err == nil {
-			sent++
-		}
-		// small delay to avoid flood
-		time.Sleep(40 * time.Millisecond)
-	}
-
-	// registrar acción en logs (opcional)
-	_ = b.publishAdminActionToLogChannel(fmt.Sprintf("SMS|%d|%s", sent, args))
-
-	return b.sendReply(ctx, u, fmt.Sprintf("SMS sent to %d users.", sent))
 }
