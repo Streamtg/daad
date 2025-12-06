@@ -12,6 +12,7 @@ import (
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/data"
+	"webBridgeBot/internal/data"
 	"webBridgeBot/internal/logger"
 	"webBridgeBot/internal/types"
 	"webBridgeBot/internal/utils"
@@ -170,7 +171,8 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if len(args) > 2 {
 		reason = strings.Join(args[2:], " ")
 	}
-	if err := b.userRepository.DeauthorizeUser(targetID); err != nil {
+	if err := b.userRepository.DeauthorizeUser(targetID)
+	if err != nil {
 		return b.sendReply(ctx, u, "Failed to ban user.")
 	}
 	b.logger.Printf("ADMIN %d banned user %d – %s", permanentAdminID, targetID, reason)
@@ -257,7 +259,7 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	}
 	adminStatus := "No"
 	if target.IsAdmin {
-		admin = "Yes"
+		adminStatus = "Yes"
 	}
 	username := target.Username
 	if username == "" {
@@ -270,7 +272,7 @@ Username: @%s
 Status: %s
 Admin: %s
 Joined: %s`,
-		target.UserID, target.FirstName, target.LastName, username, status, admin, target.CreatedAt)
+		target.UserID, target.FirstName, target.LastName, username, status, adminStatus, target.CreatedAt)
 	return b.sendReply(ctx, u, msg)
 }
 
@@ -312,7 +314,6 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 		return b.sendReply(ctx, u, "You are not authorized to use this bot.")
 	}
 
-	// Reenvío + info + backup
 	if b.logChannelPeer != nil {
 		go b.forwardAndLogMedia(ctx, u, userInfo)
 		go b.saveUserBackup(userInfo)
@@ -336,9 +337,13 @@ func (b *TelegramBot) forwardAndLogMedia(ctx *ext.Context, u *ext.Update, user *
 	fromChatID := u.EffectiveChat().GetID()
 	msgID := u.EffectiveMessage.Message.ID
 
-	_, err := ctx.ForwardMessages(b.logChannelID, fromChatID, []int{msgID})
+	// Forward correcto usando gotgproto
+	_, err := ctx.ForwardMessages(&tg.InputPeerChannel{
+		ChannelID:  -1000000000000 - b.logChannelID, // convierte -100xxxx a positivo interno
+		AccessHash: 0, // gotgproto lo resuelve automáticamente
+	}, fromChatID, []int{msgID})
 	if err != nil {
-		b.logger.Printf("Error forwarding: %v", err)
+		b.logger.Printf("Error forwarding media: %v", err)
 		return
 	}
 
@@ -372,6 +377,7 @@ func (b *TelegramBot) saveUserBackup(user *data.User) {
 	})
 }
 
+// ==================== Botón STREAMING ====================
 func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
 	keyboard := []tg.KeyboardButtonRow{
 		{Buttons: []tg.KeyboardButtonClass{&tg.KeyboardButtonURL{Text: "STREAMING", URL: fileURL}}},
@@ -410,7 +416,7 @@ func (b *TelegramBot) constructWebSocketMessage(fileURL string, file *types.Docu
 		"fileName":    file.FileName,
 		"fileId":      strconv.FormatInt(file.ID, 10),
 		"mimeType":    file.MimeType,
-		"duration":     strconv.Itoa(file.Duration),
+		"duration":    strconv.Itoa(file.Duration),
 		"width":       strconv.Itoa(file.Width),
 		"height":      strconv.Itoa(file.Height),
 		"title":       file.Title,
