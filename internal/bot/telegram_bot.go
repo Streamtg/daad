@@ -12,7 +12,6 @@ import (
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/data"
-	"webBridgeBot/internal/data"
 	"webBridgeBot/internal/logger"
 	"webBridgeBot/internal/types"
 	"webBridgeBot/internal/utils"
@@ -163,7 +162,10 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if len(args) < 2 {
 		return b.sendReply(ctx, u, "Usage: /ban <user_id> [reason]")
 	}
-	targetID, _ := strconv.ParseInt(args[1], 10, 64)
+	targetID, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil || targetID <= 0 {
+		return b.sendReply(ctx, u, "Invalid user ID.")
+	}
 	if targetID == permanentAdminID {
 		return b.sendReply(ctx, u, "You cannot ban the main administrator.")
 	}
@@ -171,8 +173,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if len(args) > 2 {
 		reason = strings.Join(args[2:], " ")
 	}
-	if err := b.userRepository.DeauthorizeUser(targetID)
-	if err != nil {
+	if err := b.userRepository.DeauthorizeUser(targetID); err != nil {
 		return b.sendReply(ctx, u, "Failed to ban user.")
 	}
 	b.logger.Printf("ADMIN %d banned user %d – %s", permanentAdminID, targetID, reason)
@@ -338,10 +339,7 @@ func (b *TelegramBot) forwardAndLogMedia(ctx *ext.Context, u *ext.Update, user *
 	msgID := u.EffectiveMessage.Message.ID
 
 	// Forward correcto usando gotgproto
-	_, err := ctx.ForwardMessages(&tg.InputPeerChannel{
-		ChannelID:  -1000000000000 - b.logChannelID, // convierte -100xxxx a positivo interno
-		AccessHash: 0, // gotgproto lo resuelve automáticamente
-	}, fromChatID, []int{msgID})
+	_, err := ctx.ForwardMessages(b.logChannelID, fromChatID, []int{msgID})
 	if err != nil {
 		b.logger.Printf("Error forwarding media: %v", err)
 		return
@@ -439,9 +437,9 @@ func (b *TelegramBot) notifyUser(targetID int64, message string) {
 	if info != nil && info.ChatID != 0 {
 		peer := b.tgCtx.PeerStorage.GetInputPeerById(info.ChatID)
 		b.tgCtx.SendMessage(info.ChatID, &tg.MessagesSendMessageRequest{
-			Peer:     peer,
-			Message:  message,
-			RandomID: rand.Int63(),
+				Peer:     peer,
+		Message:  message,
+		RandomID: rand.Int63(),
 		})
 	}
 }
