@@ -41,26 +41,26 @@ type TelegramBot struct {
 	webServer      *web.Server
 }
 
-const permanentAdminID int64 = 8030036884 // Your permanent admin ID
+const permanentAdminID int64 = 8030036884
 
 var (
 	firebaseClient *db.Client
 	firebaseCtx    = context.Background()
 	logChannelID   int64
-	botInstance    *TelegramBot // needed for logToChannel
+	botInstance    *TelegramBot
 )
 
 func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	godotenv.Load()
 
-	var err error
 	logChannelID, _ = strconv.ParseInt(os.Getenv("LOG_CHANNEL_ID"), 10, 64)
 
+	var err error
 	firebaseClient, err = initFirebase()
 	if err != nil {
-		log.Printf("Warning: Firebase not connected (using local SQLite only): %v", err)
+		log.Printf("Firebase not connected (local SQLite only): %v", err)
 	} else {
-		log.Println("Success: Firebase connected – global user sync enabled")
+		log.Println("Firebase connected - global sync active")
 		go syncLocalUsersToFirebase(log, cfg)
 	}
 
@@ -103,8 +103,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		webServer:      webSrv,
 	}
 
-	botInstance = b // save reference for logToChannel
-
+	botInstance = b
 	return b, nil
 }
 
@@ -112,7 +111,7 @@ func (b *TelegramBot) Run() {
 	b.logger.Printf("Bot started @%s\n", b.tgClient.Self.Username)
 	b.registerHandlers()
 	go b.webServer.Start()
-	b.tgproto.Idle()
+	b.tgClient.Idle()
 }
 
 func (b *TelegramBot) registerHandlers() {
@@ -127,7 +126,7 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 }
 
-// ==================== /start ====================
+// /start
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -149,22 +148,22 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 	}
 
 	if firebaseClient != nil {
-		go func() {
-			displayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
-			if displayName == "" && user.Username != "" {
-				displayName = "@" + user.Username
-			}
-			data := map[string]interface{}{
-				"display_name": displayName,
-				"username":     user.Username,
-				"added_at":     time.Now().Unix(),
-				"authorized":   true,
-				"is_admin":     isAdmin,
-			}
-			firebaseClient.NewRef("users/"+strconv.FormatInt(user.ID, 10)).Set(firebaseCtx, data)
-			logToChannel(fmt.Sprintf("New user registered: %s (%d)", displayName, user.ID))
-		}()
-	}
+			go func() {
+				displayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+				if displayName == "" && user.Username != "" {
+					displayName = "@" + user.Username
+				}
+				data := map[string]interface{}{
+					"display_name": displayName,
+					"username":     user.Username,
+					"added_at":     time.Now().Unix(),
+					"authorized":   true,
+					"is_admin":     isAdmin,
+				}
+				firebaseClient.NewRef("users/"+strconv.FormatInt(user.ID, 10)).Set(firebaseCtx, data)
+				logToChannel(fmt.Sprintf("New user: %s (%d)", displayName, user.ID))
+			}()
+		}
 
 	welcome := `Send or forward any multimedia file (audio or video) and I will instantly generate a direct streaming link for you at lightning speed.
 
@@ -186,7 +185,7 @@ Support: @Wavetouch_bot`
 	return b.sendReply(ctx, u, welcome)
 }
 
-// ==================== /sms – BROADCAST ====================
+// /sms - BROADCAST
 func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -198,7 +197,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	if firebaseClient == nil {
-		return b.sendReply(ctx, u, "Firebase not available – cannot broadcast.")
+		return b.sendReply(ctx, u, "Firebase not available - cannot broadcast.")
 	}
 
 	var users map[string]interface{}
@@ -220,7 +219,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
-	b.sendReply(ctx, u, fmt.Sprintf("Message successfully sent to %d users.", sent))
+	b.sendReply(ctx, u, fmt.Sprintf("Message sent to %d users.", sent))
 	logToChannel(fmt.Sprintf("Broadcast sent to %d users", sent))
 	return nil
 }
@@ -248,7 +247,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if err := b.userRepository.DeauthorizeUser(targetID); err != nil {
 		return b.sendReply(ctx, u, "Failed to ban user.")
 	}
-	b.logger.Printf("ADMIN %d banned user %d – Reason: %s", permanentAdminID, targetID, reason)
+	b.logger.Printf("ADMIN %d banned user %d - Reason: %s", permanentAdminID, targetID, reason)
 	go func() {
 		info, _ := b.userRepository.GetUserInfo(targetID)
 		if info != nil && info.ChatID != 0 {
@@ -327,7 +326,7 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 		if username == "" {
 			username = "N/A"
 		}
-		msg.WriteString(fmt.Sprintf("%d. "%d. `%d` – %s %s (@%s) – %s%s\n",
+		msg.WriteString(fmt.Sprintf("%d. `%d` - %s %s (@%s) - %s%s\n",
 			offset+i+1, usr.UserID, usr.FirstName, usr.LastName, username, status, adminTag))
 	}
 	totalPages := (total + pageSize - 1) / pageSize
@@ -394,7 +393,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 					return b.sendMediaToUser(ctx, u, link, file, false)
 				}
 			}
-	}
+		}
 		return b.sendReply(ctx, u, "Unsupported file or link.")
 	}
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
@@ -519,6 +518,7 @@ func syncLocalUsersToFirebase(log *logger.Logger, cfg *config.Configuration) {
 	if err != nil {
 		log.Printf("Sync error: %v", err)
 		return
+	return
 	}
 	defer rows.Close()
 
