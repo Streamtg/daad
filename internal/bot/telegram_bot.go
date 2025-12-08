@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"strconv"
@@ -16,7 +15,6 @@ import (
 	"google.golang.org/api/option"
 
 	"webBridgeBot/internal/config"
-	"webBridgeBot/internal/data"
 	"webBridgeBot/internal/data"
 	"webBridgeBot/internal/logger"
 	"webBridgeBot/internal/types"
@@ -49,6 +47,7 @@ var (
 	firebaseClient *db.Client
 	firebaseCtx    = context.Background()
 	logChannelID   int64
+	botInstance    *TelegramBot // needed for logToChannel
 )
 
 func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
@@ -94,7 +93,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 	ctx := client.CreateContext()
 	webSrv := web.NewServer(cfg, client, ctx, log, userRepo)
 
-	return &TelegramBot{
+	b := &TelegramBot{
 		config:         cfg,
 		tgClient:       client,
 		tgCtx:          ctx,
@@ -102,14 +101,18 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		userRepository: userRepo,
 		db:             db,
 		webServer:      webSrv,
-	}, nil
+	}
+
+	botInstance = b // save reference for logToChannel
+
+	return b, nil
 }
 
 func (b *TelegramBot) Run() {
 	b.logger.Printf("Bot started @%s\n", b.tgClient.Self.Username)
 	b.registerHandlers()
 	go b.webServer.Start()
-	b.tgClient.Idle()
+	b.tgproto.Idle()
 }
 
 func (b *TelegramBot) registerHandlers() {
@@ -119,7 +122,7 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("unban", b.handleUnbanUser))
 	d.AddHandler(handlers.NewCommand("listusers", b.handleListUsers))
 	d.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
-	d.AddHandler(handlers.NewCommand("sms", b.handleSMSCommand)) // NEW
+	d.AddHandler(handlers.NewCommand("sms", b.handleSMSCommand))
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 }
@@ -139,25 +142,24 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 		user.FirstName,
 		user.LastName,
 		user.Username,
-		true,  // auto-authorized
+		true,
 		isAdmin,
 	); err != nil {
 		b.logger.Printf("Failed to store user %d: %v", user.ID, err)
 	}
 
-	// Sync to Firebase
 	if firebaseClient != nil {
 		go func() {
 			displayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
-			if displayName == "" {
+			if displayName == "" && user.Username != "" {
 				displayName = "@" + user.Username
 			}
 			data := map[string]interface{}{
 				"display_name": displayName,
-				"username":   user.Username,
-				"added_at":   time.Now().Unix(),
-				"authorized": true,
-				"is_admin":   isAdmin,
+				"username":     user.Username,
+				"added_at":     time.Now().Unix(),
+				"authorized":   true,
+				"is_admin":     isAdmin,
 			}
 			firebaseClient.NewRef("users/"+strconv.FormatInt(user.ID, 10)).Set(firebaseCtx, data)
 			logToChannel(fmt.Sprintf("New user registered: %s (%d)", displayName, user.ID))
@@ -214,7 +216,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 			if err == nil {
 				sent++
 			}
-			time.Sleep(33 * time.Millisecond) // Safe rate limit
+			time.Sleep(33 * time.Millisecond)
 		}
 	}
 
@@ -325,8 +327,8 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 		if username == "" {
 			username = "N/A"
 		}
-		msg.WriteString(fmt.Sprintf("%d. `%d` – %s %s (@%s) – %s%s\n",
-			offset+i+i+1, usr.UserID, usr.FirstName, usr.LastName, username, status, adminTag))
+		msg.WriteString(fmt.Sprintf("%d. "%d. `%d` – %s %s (@%s) – %s%s\n",
+			offset+i+1, usr.UserID, usr.FirstName, usr.LastName, username, status, adminTag))
 	}
 	totalPages := (total + pageSize - 1) / pageSize
 	msg.WriteString(fmt.Sprintf("\nPage %d of %d (%d total users)", page, totalPages, total))
@@ -392,14 +394,14 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 					return b.sendMediaToUser(ctx, u, link, file, false)
 				}
 			}
-		}
+	}
 		return b.sendReply(ctx, u, "Unsupported file or link.")
 	}
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 	return b.sendMediaToUser(ctx, u, fileURL, file, false)
 }
 
-func (b *TelegramBot) handleAnyUpdate(ctx *ext.Context, u *ext.Update) error { return nil }
+func (b *TelegramBot) handleAnyUpdate(*ext.Context, *ext.Update) error { return nil }
 
 func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
 	keyboard := []tg.KeyboardButtonRow{
@@ -494,11 +496,11 @@ func initFirebase() (*db.Client, error) {
 }
 
 func logToChannel(text string) {
-	if logChannelID == 0 {
+	if logChannelID == 0 || botInstance == nil {
 		return
 	}
 	go func() {
-		b.tgClient.API().MessagesSendMessage(b.tgCtx, &tg.MessagesSendMessageRequest{
+		botInstance.tgClient.API().MessagesSendMessage(botInstance.tgCtx, &tg.MessagesSendMessageRequest{
 			Peer:    &tg.InputPeerChannel{ChannelID: -logChannelID},
 			Message: "[BOT LOG] " + text,
 		})
