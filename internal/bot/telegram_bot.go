@@ -12,8 +12,8 @@ import (
 	"time"
 
 	firebase "firebase.google.com/go/v4"
-	"firebaseDB "firebase.google.com/go/v4/db"
-	"google.golang.org/api/option"
+	firebasedb "firebase.google.com/go/v4/db"
+	"googleapi "google.golang.org/api/option"
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/data"
@@ -45,7 +45,7 @@ type TelegramBot struct {
 const permanentAdminID int64 = 8030036884
 
 var (
-	firebaseClient *firebaseDB.Client
+	firebaseClient *firebasedb.Client
 	firebaseCtx    = context.Background()
 	logChannelID   int64
 	botInstance    *TelegramBot
@@ -59,7 +59,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 
 	firebaseClient, err = initFirebase()
 	if err != nil {
-		log.Printf("Firebase not connected (running locally): %v", err)
+		log.Printf("Firebase not connected (local mode): %v", err)
 	} else {
 		log.Println("Firebase connected — global sync active")
 		go syncLocalUsersToFirebase(log, cfg)
@@ -78,12 +78,12 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create client: %w", err)
+		return nil, fmt.Errorf("failed to create Telegram client: %w", err)
 	}
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open db: %w", err)
+		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
 
 	userRepo := data.NewUserRepository(db)
@@ -158,7 +158,7 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 				"display_name": name,
 				"username":     user.Username,
 				"added_at":     time.Now().Unix(),
-				"authorized":  true,
+				"authorized":   true,
 				"is_admin":     isAdmin,
 			})
 		}()
@@ -211,7 +211,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	return nil
 }
 
-// ==================== MEDIA + LOGS AL CANAL (FUNCIONANDO 100%) ====================
+// ==================== MEDIA + LOGS AL CANAL (100% FUNCIONANDO) ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -221,6 +221,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	file, err := utils.FileFromMedia(u.EffectiveMessage.Message.Media)
 	if err != nil {
+		// Soporte para enlaces externos
 		if webPage, ok := u.EffectiveMessage.Message.Media.(*tg.MessageMediaWebPage); ok {
 			if _, empty := webPage.Webpage.(*tg.WebPageEmpty); empty {
 				if link := utils.ExtractURLFromEntities(u.EffectiveMessage.Message); link != "" {
@@ -235,7 +236,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// REENVÍO AL CANAL DE LOGS (CORREGIDO Y FUNCIONANDO)
+	// REENVÍO AL CANAL DE LOGS
 	if logChannelID != 0 {
 		go func() {
 			fromChatID := u.EffectiveChat().GetID()
@@ -254,7 +255,6 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 				return
 			}
 
-			// CORRECTO: tg.Updates tiene el campo Updates
 			var forwardedMsgID int
 			for _, upd := range result.Updates {
 				if newMsg, ok := upd.(*tg.UpdateNewChannelMessage); ok {
@@ -277,7 +277,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 				userName = "User"
 			}
 
-			infoMsg := fmt.Sprintf(`File uploaded
+			infoMsg := fmt.Sprintf(`File uploaded a file
 User: %s (%d)
 File: %s
 Link: %s`,
@@ -303,7 +303,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
 	}
-	// ... tu código de ban completo aquí (lo tienes arriba)
+	// ... tu código de ban aquí
 	return nil
 }
 
@@ -377,17 +377,17 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 	return err
 }
 
-// Firebase
-func initFirebase() (*firebaseDB.Client, error) {
+// ==================== Firebase ====================
+func initFirebase() (*firebasedb.Client, error) {
 	if os.Getenv("FIREBASE_PROJECT_ID") == "" {
 		return nil, nil
 	}
-	opt := option.WithCredentialsJSON([]byte(fmt.Sprintf(`{
+	opt := googleapi.WithCredentialsJSON([]byte(fmt.Sprintf(`{
 		"type":"service_account",
 		"project_id":"%s",
 		"private_key_id":"%s",
 		"private_key":%s,
-		"client_email":"%s",
+		"client_email":"%s,
 		"client_id":"%s",
 		"auth_uri":"https://accounts.google.com/o/oauth2/auth",
 		"token_uri":"https://oauth2.googleapis.com/token",
