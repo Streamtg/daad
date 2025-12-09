@@ -241,28 +241,53 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 	}
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
+	return b.sendMediaToUser(ctx, u, fileURL, file, false)
+}
 
-	// LOG AL CANAL CADA VEZ QUE SE GENERA UN LINK
+func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
+	keyboard := []tg.KeyboardButtonRow{
+		{Buttons: []tg.KeyboardButtonClass{&tg.KeyboardButtonURL{Text: "STREAMING", URL: fileURL}}},
+	}
+	_, err := ctx.Reply(u, ext.ReplyTextString(fileURL), &ext.ReplyOpts{
+		Markup: &tg.ReplyInlineMarkup{Rows: keyboard},
+	})
+	if err != nil {
+		b.logger.Printf("Failed to send media reply: %v", err)
+		return err
+	}
+
+	// LOG AL CANAL DE CADA ARCHIVO SUBIDO
 	go func() {
-		userName := strings.TrimSpace(userInfo.FirstName + " " + userInfo.LastName)
-		if userName == "" && userInfo.Username != "" {
-			userName = "@" + userInfo.Username
-		}
-		if userName == "" {
-			userName = "Unknown user"
+		userInfo, _ := b.userRepository.GetUserInfo(u.EffectiveUser().ID)
+		userName := "Unknown user"
+		if userInfo != nil {
+			userName = strings.TrimSpace(userInfo.FirstName + " " + userInfo.LastName)
+			if userName == "" && userInfo.Username != "" {
+				userName = "@" + userInfo.Username
+			}
+			if userName == "" {
+				userName = "User ID: " + strconv.FormatInt(u.EffectiveUser().ID, 10)
+			}
 		}
 
-		logMsg := fmt.Sprintf("File uploaded\nUser: %s (%d)\nFile: %s\nLink: %s\nTime: %s",
+		logMsg := fmt.Sprintf(`File uploaded
+User: %s (%d)
+File: %s
+Link: %s
+Time: %s`,
 			userName,
-			userID,
+			u.EffectiveUser().ID,
 			file.FileName,
 			fileURL,
-			time.Now().Format("2006-01-02 15:04:05 MST"),
+			time.Now().Format("2006-01-02 15:04:05 -07:00"),
 		)
+
 		logToChannel(logMsg)
 	}()
 
-	return b.sendMediaToUser(ctx, u, fileURL, file, false)
+	wsMsg := b.constructWebSocketMessage(fileURL, file)
+	b.webServer.GetWSManager().PublishMessage(u.EffectiveUser().ID, wsMsg)
+	return nil
 }
 
 // ==================== RESTO DE TUS HANDLERS (100% intactos) ====================
@@ -415,22 +440,6 @@ Joined: %s`,
 }
 
 func (b *TelegramBot) handleAnyUpdate(*ext.Context, *ext.Update) error { return nil }
-
-func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
-	keyboard := []tg.KeyboardButtonRow{
-		{Buttons: []tg.KeyboardButtonClass{&tg.KeyboardButtonURL{Text: "STREAMING", URL: fileURL}}},
-	}
-	_, err := ctx.Reply(u, ext.ReplyTextString(fileURL), &ext.ReplyOpts{
-		Markup: &tg.ReplyInlineMarkup{Rows: keyboard},
-	})
-	if err != nil {
-		b.logger.Printf("Failed to send media reply: %v", err)
-		return err
-	}
-	wsMsg := b.constructWebSocketMessage(fileURL, file)
-	b.webServer.GetWSManager().PublishMessage(u.EffectiveUser().ID, wsMsg)
-	return nil
-}
 
 func (b *TelegramBot) constructWebSocketMessage(fileURL string, file *types.DocumentFile) map[string]string {
 	proxied := b.wrapWithProxyIfNeeded(fileURL)
