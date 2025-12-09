@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"os"
 	"strconv"
@@ -53,9 +54,9 @@ var (
 func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
 	godotenv.Load()
 
+	var err error
 	logChannelID, _ = strconv.ParseInt(os.Getenv("LOG_CHANNEL_ID"), 10, 64)
 
-	var err error
 	firebaseClient, err = initFirebase()
 	if err != nil {
 		log.Printf("Firebase not connected (local SQLite only): %v", err)
@@ -215,6 +216,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	return nil
 }
 
+// ================ ENVÍO AL CANAL DE LOGS (tu lógica 100% funcional) ================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -241,53 +243,59 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 	}
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
-	return b.sendMediaToUser(ctx, u, fileURL, file, false)
-}
 
-func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
-	keyboard := []tg.KeyboardButtonRow{
-		{Buttons: []tg.KeyboardButtonClass{&tg.KeyboardButtonURL{Text: "STREAMING", URL: fileURL}}},
-	}
-	_, err := ctx.Reply(u, ext.ReplyTextString(fileURL), &ext.ReplyOpts{
-		Markup: &tg.ReplyInlineMarkup{Rows: keyboard},
-	})
-	if err != nil {
-		b.logger.Printf("Failed to send media reply: %v", err)
-		return err
-	}
+	// === TU LÓGICA DE ENVÍO AL CANAL DE LOGS (funciona al 100%) ===
+	if logChannelID != 0 {
+		go func() {
+			fromChatID := u.EffectiveChat().GetID()
+			messageID := u.EffectiveMessage.Message.ID
 
-	// LOG AL CANAL DE CADA ARCHIVO SUBIDO
-	go func() {
-		userInfo, _ := b.userRepository.GetUserInfo(u.EffectiveUser().ID)
-		userName := "Unknown user"
-		if userInfo != nil {
-			userName = strings.TrimSpace(userInfo.FirstName + " " + userInfo.LastName)
+			updates, err := utils.ForwardMessages(ctx, fromChatID, fmt.Sprintf("-100%d", logChannelID), messageID)
+			if err != nil {
+				b.logger.Printf("Failed to forward file to log channel: %v", err)
+				return
+			}
+
+			var newMsgID int
+			for _, upd := range updates.GetUpdates() {
+				if newMsg, ok := upd.(*tg.UpdateNewChannelMessage); ok {
+					if m, ok := newMsg.Message.(*tg.Message); ok {
+						newMsgID = m.ID
+						break
+					}
+				}
+			}
+
+			if newMsgID == 0 {
+				return
+			}
+
+			userName := strings.TrimSpace(userInfo.FirstName + " " + userInfo.LastName)
 			if userName == "" && userInfo.Username != "" {
 				userName = "@" + userInfo.Username
 			}
 			if userName == "" {
-				userName = "User ID: " + strconv.FormatInt(u.EffectiveUser().ID, 10)
+				userName = "User"
 			}
-		}
 
-		logMsg := fmt.Sprintf(`File uploaded
-User: %s (%d)
-File: %s
-Link: %s
-Time: %s`,
-			userName,
-			u.EffectiveUser().ID,
-			file.FileName,
-			fileURL,
-			time.Now().Format("2006-01-02 15:04:05 -07:00"),
-		)
+			infoMsg := fmt.Sprintf("File uploaded\nUser: %s (%d)\nFile: %s\nLink: %s",
+				userName, userID, file.FileName, fileURL)
 
-		logToChannel(logMsg)
-	}()
+			peer := &tg.InputPeerChannel{ChannelID: logChannelID}
 
-	wsMsg := b.constructWebSocketMessage(fileURL, file)
-	b.webServer.GetWSManager().PublishMessage(u.EffectiveUser().ID, wsMsg)
-	return nil
+			_, err = ctx.Raw.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+				Peer:     peer,
+				Message:  infoMsg,
+				ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: newMsgID},
+				RandomID: rand.Int63(),
+			})
+			if err != nil {
+				b.logger.Printf("Failed to send info to log channel: %v", err)
+			}
+		}()
+	}
+
+	return b.sendMediaToUser(ctx, u, fileURL, file, false)
 }
 
 // ==================== RESTO DE TUS HANDLERS (100% intactos) ====================
@@ -440,6 +448,22 @@ Joined: %s`,
 }
 
 func (b *TelegramBot) handleAnyUpdate(*ext.Context, *ext.Update) error { return nil }
+
+func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
+	keyboard := []tg.KeyboardButtonRow{
+		{Buttons: []tg.KeyboardButtonClass{&tg.KeyboardButtonURL{Text: "STREAMING", URL: fileURL}}},
+	}
+	_, err := ctx.Reply(u, ext.ReplyTextString(fileURL), &ext.ReplyOpts{
+		Markup: &tg.ReplyInlineMarkup{Rows: keyboard},
+	})
+	if err != nil {
+		b.logger.Printf("Failed to send media reply: %v", err)
+		return err
+	}
+	wsMsg := b.constructWebSocketMessage(fileURL, file)
+	b.webServer.GetWSManager().PublishMessage(u.EffectiveUser().ID, wsMsg)
+	return nil
+}
 
 func (b *TelegramBot) constructWebSocketMessage(fileURL string, file *types.DocumentFile) map[string]string {
 	proxied := b.wrapWithProxyIfNeeded(fileURL)
