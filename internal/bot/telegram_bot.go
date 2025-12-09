@@ -1,12 +1,10 @@
 package bot
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"math/rand"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
