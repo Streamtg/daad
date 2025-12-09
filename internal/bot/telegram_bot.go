@@ -126,7 +126,6 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 }
 
-// /start
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -148,22 +147,22 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 	}
 
 	if firebaseClient != nil {
-			go func() {
-				displayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
-				if displayName == "" && user.Username != "" {
-					displayName = "@" + user.Username
-				}
-				data := map[string]interface{}{
-					"display_name": displayName,
-					"username":     user.Username,
-					"added_at":     time.Now().Unix(),
-					"authorized":   true,
-					"is_admin":     isAdmin,
-				}
-				firebaseClient.NewRef("users/"+strconv.FormatInt(user.ID, 10)).Set(firebaseCtx, data)
-				logToChannel(fmt.Sprintf("New user: %s (%d)", displayName, user.ID))
-			}()
-		}
+		go func() {
+			displayName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+			if displayName == "" && user.Username != "" {
+				displayName = "@" + user.Username
+			}
+			data := map[string]interface{}{
+				"display_name": displayName,
+				"username":     user.Username,
+				"added_at":     time.Now().Unix(),
+				"authorized":   true,
+				"is_admin":     isAdmin,
+			}
+			firebaseClient.NewRef("users/"+strconv.FormatInt(user.ID, 10)).Set(firebaseCtx, data)
+			logToChannel(fmt.Sprintf("New user: %s (%d)", displayName, user.ID))
+		}()
+	}
 
 	welcome := `Send or forward any multimedia file (audio or video) and I will instantly generate a direct streaming link for you at lightning speed.
 
@@ -172,20 +171,12 @@ Supported formats:
 • Video: MP4, MKV, AVI, MOV, WEBM...
 • Photos & documents (sent as files)
 
-How to use me:
-• Personal media host (movies, series, documentaries)
-• Share large videos without Telegram compression
-• Build your private streaming library
-• Stream directly in browser from any device
-• Access your files anywhere, anytime
-
 Just send me a file — magic happens instantly!
 Support: @Wavetouch_bot`
 
 	return b.sendReply(ctx, u, welcome)
 }
 
-// /sms - BROADCAST
 func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -224,7 +215,57 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	return nil
 }
 
-// ==================== ORIGINAL HANDLERS (100% intact) ====================
+func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
+	userID := u.EffectiveUser().ID
+	userInfo, err := b.userRepository.GetUserInfo(userID)
+	if err != nil || !userInfo.IsAuthorized {
+		return b.sendReply(ctx, u, "You are not authorized to use this bot.")
+	}
+
+	file, err := utils.FileFromMedia(u.EffectiveMessage.Message.Media)
+	if err != nil {
+		if webPage, ok := u.EffectiveMessage.Message.Media.(*tg.MessageMediaWebPage); ok {
+			if _, empty := webPage.Webpage.(*tg.WebPageEmpty); empty {
+				if link := utils.ExtractURLFromEntities(u.EffectiveMessage.Message); link != "" {
+					mime := utils.DetectMimeTypeFromURL(link)
+					file = &types.DocumentFile{
+						FileName: "external_link",
+						MimeType: mime,
+						FileSize: 0,
+					}
+					return b.sendMediaToUser(ctx, u, link, file, false)
+				}
+			}
+		}
+		return b.sendReply(ctx, u, "Unsupported file or link.")
+	}
+
+	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
+
+	// LOG AL CANAL CADA VEZ QUE SE GENERA UN LINK
+	go func() {
+		userName := strings.TrimSpace(userInfo.FirstName + " " + userInfo.LastName)
+		if userName == "" && userInfo.Username != "" {
+			userName = "@" + userInfo.Username
+		}
+		if userName == "" {
+			userName = "Unknown user"
+		}
+
+		logMsg := fmt.Sprintf("File uploaded\nUser: %s (%d)\nFile: %s\nLink: %s\nTime: %s",
+			userName,
+			userID,
+			file.FileName,
+			fileURL,
+			time.Now().Format("2006-01-02 15:04:05 MST"),
+		)
+		logToChannel(logMsg)
+	}()
+
+	return b.sendMediaToUser(ctx, u, fileURL, file, false)
+}
+
+// ==================== RESTO DE TUS HANDLERS (100% intactos) ====================
 func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -373,33 +414,6 @@ Joined: %s`,
 	return b.sendReply(ctx, u, msg)
 }
 
-func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
-	userID := u.EffectiveUser().ID
-	userInfo, err := b.userRepository.GetUserInfo(userID)
-	if err != nil || !userInfo.IsAuthorized {
-		return b.sendReply(ctx, u, "You are not authorized to use this bot.")
-	}
-	file, err := utils.FileFromMedia(u.EffectiveMessage.Message.Media)
-	if err != nil {
-		if webPage, ok := u.EffectiveMessage.Message.Media.(*tg.MessageMediaWebPage); ok {
-			if _, empty := webPage.Webpage.(*tg.WebPageEmpty); empty {
-				if link := utils.ExtractURLFromEntities(u.EffectiveMessage.Message); link != "" {
-					mime := utils.DetectMimeTypeFromURL(link)
-					file = &types.DocumentFile{
-						FileName: "external_link",
-						MimeType: mime,
-						FileSize: 0,
-					}
-					return b.sendMediaToUser(ctx, u, link, file, false)
-				}
-			}
-		}
-		return b.sendReply(ctx, u, "Unsupported file or link.")
-	}
-	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
-	return b.sendMediaToUser(ctx, u, fileURL, file, false)
-}
-
 func (b *TelegramBot) handleAnyUpdate(*ext.Context, *ext.Update) error { return nil }
 
 func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile, _ bool) error {
@@ -459,7 +473,6 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 	return err
 }
 
-// ==================== Firebase & Logging ====================
 func initFirebase() (*db.Client, error) {
 	if os.Getenv("FIREBASE_PROJECT_ID") == "" {
 		return nil, nil
@@ -518,7 +531,6 @@ func syncLocalUsersToFirebase(log *logger.Logger, cfg *config.Configuration) {
 	if err != nil {
 		log.Printf("Sync error: %v", err)
 		return
-	return
 	}
 	defer rows.Close()
 
