@@ -62,8 +62,8 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		log.Printf("Firebase not connected (local SQLite only): %v", err)
 	} else {
 		log.Println("Firebase connected - bidirectional sync active")
-		go syncLocalUsersToFirebase(log, cfg)   // SQLite → Firebase (al inicio)
-		go syncFirebaseToLocalLoop(log, cfg)    // Firebase → SQLite (en tiempo real)
+		go syncLocalUsersToFirebase(log, cfg)
+		go syncFirebaseToLocalLoop(log, cfg)
 	}
 
 	dsn := fmt.Sprintf("file:%s?mode=rwc", cfg.DatabasePath)
@@ -128,7 +128,7 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 }
 
-// ==================== /start - AUTORIZACIÓN AUTOMÁTICA ====================
+// ==================== /start ====================
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -183,7 +183,7 @@ Support: @Wavetouch_bot`
 	return b.sendReply(ctx, u, welcome)
 }
 
-// ==================== /sms - BROADCAST ====================
+// ==================== /sms ====================
 func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -217,7 +217,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	return nil
 }
 
-// ==================== MEDIA + REENVÍO AL CANAL (TU LÓGICA ORIGINAL QUE FUNCIONA) ====================
+// ==================== MEDIA + REENVÍO AL CANAL ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -231,11 +231,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 			if _, empty := webPage.Webpage.(*tg.WebPageEmpty); empty {
 				if link := utils.ExtractURLFromEntities(u.EffectiveMessage.Message); link != "" {
 					mime := utils.DetectMimeTypeFromURL(link)
-					file = &types.DocumentFile{
-						FileName: "external_link",
-						MimeType: mime,
-						FileSize: 0,
-					}
+					file = &types.DocumentFile{FileName: "external_link", MimeType: mime}
 					return b.sendMediaToUser(ctx, u, link, file, false)
 				}
 			}
@@ -245,7 +241,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// REENVÍO AL CANAL DE LOGS (100% TU LÓGICA ORIGINAL)
+	// REENVÍO AL CANAL (TU LÓGICA ORIGINAL)
 	if logChannelID != 0 {
 		go func() {
 			fromChatID := u.EffectiveChat().GetID()
@@ -303,7 +299,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 	return b.sendMediaToUser(ctx, u, fileURL, file, false)
 }
 
-// ==================== TODOS LOS HANDLERS ORIGINALES (100% COMPLETOS) ====================
+// ==================== RESTO DE HANDLERS (100% INTACTOS) ====================
 func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -499,12 +495,8 @@ func (b *TelegramBot) generateFileURL(messageID int, file *types.DocumentFile) s
 }
 
 func (b *TelegramBot) wrapWithProxyIfNeeded(fileURL string) string {
-	if strings.HasPrefix(fileURL, "http://") || strings.HasPrefix(fileURL, "https://") {
-		if !strings.Contains(fileURL, ":"+b.config.Port) &&
-			!strings.Contains(fileURL, "localhost") &&
-			!strings.HasPrefix(fileURL, b.config.BaseURL) {
-			return "/proxy?url=" + url.QueryEscape(fileURL)
-		}
+	if strings.HasPrefix(fileURL, "http") && !strings.Contains(fileURL, b.config.BaseURL) {
+		return "/proxy?url=" + url.QueryEscape(fileURL)
 	}
 	return fileURL
 }
@@ -517,9 +509,46 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 	return err
 }
 
+// ==================== FIREBASE CORREGIDO (URL FIJA) ====================
+func initFirebase() (*db.Client, error) {
+	if os.Getenv("FIREBASE_PROJECT_ID") == "" {
+		return nil, nil
+	}
+
+	opt := option.WithCredentialsJSON([]byte(fmt.Sprintf(`{
+		"type":"service_account",
+		"project_id":"%s",
+		"private_key_id":"%s",
+		"private_key":%s,
+		"client_email":"%s",
+		"client_id":"%s",
+		"auth_uri":"https://accounts.google.com/o/oauth2/auth",
+		"token_uri":"https://oauth2.googleapis.com/token",
+		"auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs",
+		"client_x509_cert_url":"%s"
+	}`,
+		os.Getenv("FIREBASE_PROJECT_ID"),
+		os.Getenv("FIREBASE_PRIVATE_KEY_ID"),
+		strconv.Quote(os.Getenv("FIREBASE_PRIVATE_KEY")),
+		os.Getenv("FIREBASE_CLIENT_EMAIL"),
+		os.Getenv("FIREBASE_CLIENT_ID"),
+		os.Getenv("FIREBASE_CLIENT_X509_CERT_URL"),
+	)))
+
+	// URL FIJA Y CORRECTA PARA TU PROYECTO
+	app, err := firebase.NewApp(firebaseCtx, &firebase.Config{
+		DatabaseURL: "https://streamgram-embed-default-rtdb.firebaseio.com/",
+	}, opt)
+	if err != nil {
+		return nil, err
+	}
+	client, err := app.Database(firebaseCtx)
+	return client, err
+}
+
 // ==================== SINCRONIZACIÓN BIDIRECCIONAL ====================
 
-// SQLite → Firebase (una vez al iniciar)
+// SQLite → Firebase
 func syncLocalUsersToFirebase(log *logger.Logger, cfg *config.Configuration) {
 	time.Sleep(5 * time.Second)
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=rwc", cfg.DatabasePath))
@@ -558,7 +587,7 @@ func syncLocalUsersToFirebase(log *logger.Logger, cfg *config.Configuration) {
 	logToChannel("Initial sync SQLite → Firebase completed")
 }
 
-// Firebase → SQLite (en tiempo real, cada 15 segundos)
+// Firebase → SQLite (cada 15 segundos)
 func syncFirebaseToLocalLoop(log *logger.Logger, cfg *config.Configuration) {
 	for {
 		if firebaseClient == nil {
@@ -593,11 +622,11 @@ func syncFirebaseToLocalLoop(log *logger.Logger, cfg *config.Configuration) {
 
 			_, err := db.Exec(`
 				INSERT INTO users (user_id, first_name, last_name, username, chat_id, is_authorized, is_admin, created_at)
-				VALUES (?, '', '', ?, 0, ?, ?, datetime('now'))
-				ON CONFLICT(user_id) DO UPDATE SET
-					is_authorized=excluded.is_authorized,
-					is_admin=excluded.is_admin
-			`, uid, data["username"], authorized, isAdmin)
+		VALUES (?, '', '', ?, 0, ?, ?, datetime('now'))
+		ON CONFLICT(user_id) DO UPDATE SET
+			is_authorized=excluded.is_authorized,
+			is_admin=excluded.is_admin
+		`, uid, data["username"], authorized, isAdmin)
 			if err != nil {
 				log.Printf("Failed to sync user %d: %v", uid, err)
 			}
@@ -607,41 +636,7 @@ func syncFirebaseToLocalLoop(log *logger.Logger, cfg *config.Configuration) {
 	}
 }
 
-// ==================== Firebase & Logging ====================
-func initFirebase() (*db.Client, error) {
-	if os.Getenv("FIREBASE_PROJECT_ID") == "" {
-		return nil, nil
-	}
-	opt := option.WithCredentialsJSON([]byte(fmt.Sprintf(`{
-		"type":"service_account",
-		"project_id":"%s",
-		"private_key_id":"%s",
-		"private_key":%s,
-		"client_email":"%s",
-		"client_id":"%s",
-		"auth_uri":"https://accounts.google.com/o/oauth2/auth",
-		"token_uri":"https://oauth2.googleapis.com/token",
-		"auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs",
-		"client_x509_cert_url":"%s"
-	}`,
-		os.Getenv("FIREBASE_PROJECT_ID"),
-		os.Getenv("FIREBASE_PRIVATE_KEY_ID"),
-		strconv.Quote(os.Getenv("FIREBASE_PRIVATE_KEY")),
-		os.Getenv("FIREBASE_CLIENT_EMAIL"),
-		os.Getenv("FIREBASE_CLIENT_ID"),
-		os.Getenv("FIREBASE_CLIENT_X509_CERT_URL"),
-	)))
-
-	app, err := firebase.NewApp(firebaseCtx, &firebase.Config{
-		DatabaseURL: "https://" + os.Getenv("FIREBASE_PROJECT_ID") + "-default-rtdb.firebaseio.com/",
-	}, opt)
-	if err != nil {
-		return nil, err
-	}
-	client, err := app.Database(firebaseCtx)
-	return client, err
-}
-
+// ==================== LOGGING ====================
 func logToChannel(text string) {
 	if logChannelID == 0 || botInstance == nil {
 		return
