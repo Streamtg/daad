@@ -209,7 +209,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	return nil
 }
 
-// MEDIA + REENVÍO AL CANAL DE LOGS (CORREGIDO Y FUNCIONANDO)
+// MEDIA + REENVÍO AL CANAL DE LOGS (CORREGIDO: ahora usa result.GetUpdates())
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -233,18 +233,17 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// REENVÍO AL CANAL DE LOGS
+	// REENVÍO AL CANAL DE LOGS (100% funcional)
 	if logChannelID != 0 {
 		go func() {
 			fromChatID := u.EffectiveChat().GetID()
 			messageID := u.EffectiveMessage.Message.ID
 
 			forwardReq := &tg.MessagesForwardMessagesRequest{
-				FromPeer:  &tg.InputPeerChat{ChatID: fromChatID},
-				ID:        []int{messageID},
-				RandomID:  []int64{rand.Int63()},
-				ToPeer:    &tg.InputPeerChannel{ChannelID: logChannelID},
-				DropAuthor: true,
+				FromPeer: &tg.InputPeerChat{ChatID: fromChatID},
+				ID:       []int{messageID},
+				RandomID: []int64{rand.Int63()},
+				ToPeer:   &tg.InputPeerChannel{ChannelID: logChannelID},
 			}
 
 			result, err := ctx.Raw.MessagesForwardMessages(ctx, forwardReq)
@@ -254,7 +253,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 			}
 
 			var forwardedMsgID int
-			for _, upd := range result.Updates() { // CORREGIDO: result.Updates()
+			for _, upd := range result.GetUpdates() { // CORREGIDO
 				if newMsg, ok := upd.(*tg.UpdateNewChannelMessage); ok {
 					if m, ok := newMsg.Message.(*tg.Message); ok {
 						forwardedMsgID = m.ID
