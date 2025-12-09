@@ -1,9 +1,12 @@
 package bot
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"math/rand"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +46,7 @@ const permanentAdminID int64 = 8030036884
 
 var (
 	firebaseClient *db.Client
+	firebaseCtx    = context.Background()
 	logChannelID   int64
 	botInstance    *TelegramBot
 )
@@ -55,9 +59,9 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 
 	firebaseClient, err = initFirebase()
 	if err != nil {
-		log.Printf("Firebase not connected (local SQLite only): %v", err)
+		log.Printf("Firebase not connected (local mode): %v", err)
 	} else {
-		log.Println("Firebase connected - global sync active")
+		log.Println("Firebase connected — global sync active")
 		go syncLocalUsersToFirebase(log, cfg)
 	}
 
@@ -105,7 +109,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 }
 
 func (b *TelegramBot) Run() {
-	b.logger.Printf("Bot started @%s\n", b.tgClient.Self.Username)
+	b.logger.Printf("Bot started @%s", b.tgClient.Self.Username)
 	b.registerHandlers()
 	go b.webServer.Start()
 	b.tgClient.Idle()
@@ -138,7 +142,7 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 		user.FirstName,
 		user.LastName,
 		user.Username,
-		true,  // ← AUTORIZADO AUTOMÁTICAMENTE
+		true,
 		isAdmin,
 	); err != nil {
 		b.logger.Printf("Failed to store user %d: %v", user.ID, err)
@@ -175,46 +179,44 @@ Support: @Wavetouch_bot`
 	return b.sendReply(ctx, u, welcome)
 }
 
-// ==================== /sms - BROADCAST ====================
+// ==================== /sms ====================
 func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
 	}
 
-	message := strings.TrimSpace(strings.TrimPrefix(u.EffectiveMessage.Text, "/sms"))
-	if message == "" {
+	msg := strings.TrimSpace(strings.TrimPrefix(u.EffectiveMessage.Text, "/sms"))
+	if msg == "" {
 		return b.sendReply(ctx, u, "Usage: /sms <your message>")
 	}
 
 	if firebaseClient == nil {
-		return b.sendReply(ctx, u, "Firebase not available - cannot broadcast.")
+		return b.sendReply(ctx, u, "Firebase not available")
 	}
 
 	var users map[string]interface{}
 	if err := firebaseClient.NewRef("users").Get(firebaseCtx, &users); err != nil || users == nil {
-		return b.sendReply(ctx, u, "Failed to load user list.")
+		return b.sendReply(ctx, u, "Failed to load users")
 	}
 
 	sent := 0
 	for idStr := range users {
 		if uid, err := strconv.ParseInt(idStr, 10, 64); err == nil && uid != 0 {
-			_, err := b.tgClient.API().MessagesSendMessage(b.tgCtx, &tg.MessagesSendMessageRequest{
+			b.tgClient.API().MessagesSendMessage(b.tgCtx, &tg.MessagesSendMessageRequest{
 				Peer:    &tg.InputPeerUser{UserID: uid},
-				Message: "Message from admin:\n\n" + message,
+				Message: "Admin message:\n\n" + msg,
 			})
-			if err == nil {
-				sent++
-			}
+			sent++
 			time.Sleep(33 * time.Millisecond)
 		}
 	}
 
-	b.sendReply(ctx, u, fmt.Sprintf("Message sent to %d users.", sent))
+	b.sendReply(ctx, u, fmt.Sprintf("Message sent to %d users", sent))
 	logToChannel(fmt.Sprintf("Broadcast sent to %d users", sent))
 	return nil
 }
 
-// ==================== MEDIA + REENVÍO AL CANAL (100% FUNCIONANDO) ====================
+// ==================== MEDIA + REENVÍO AL CANAL ====================
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -228,21 +230,16 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 			if _, empty := webPage.Webpage.(*tg.WebPageEmpty); empty {
 				if link := utils.ExtractURLFromEntities(u.EffectiveMessage.Message); link != "" {
 					mime := utils.DetectMimeTypeFromURL(link)
-					file = &types.DocumentFile{
-						FileName: "external_link",
-						MimeType: mime,
-						FileSize: 0,
-					}
+					file = &types.DocumentFile{FileName: "external_link", MimeType: mime}
 					return b.sendMediaToUser(ctx, u, link, file, false)
 				}
 			}
 		}
-		return b.sendReply(ctx, u, "Unsupported file or link.")
+		return b.sendReply(ctx, u, "Unsupported media.")
 	}
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// REENVÍO AL CANAL DE LOGS
 	if logChannelID != 0 {
 		go func() {
 			fromChatID := u.EffectiveChat().GetID()
@@ -262,7 +259,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 			}
 
 			var forwardedMsgID int
-			for _, upd := range result.Updates {
+			for _, upd := range result.GetUpdates() {
 				if newMsg, ok := upd.(*tg.UpdateNewChannelMessage); ok {
 					if m, ok := newMsg.Message.(*tg.Message); ok {
 						forwardedMsgID = m.ID
@@ -304,7 +301,7 @@ Link: %s`,
 	return b.sendMediaToUser(ctx, u, fileURL, file, false)
 }
 
-// ==================== RESTO DE HANDLERS (100% COMPLETOS) ====================
+// ==================== RESTO DE HANDLERS ====================
 func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -508,7 +505,6 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 	return err
 }
 
-// ==================== Firebase ====================
 func initFirebase() (*db.Client, error) {
 	if os.Getenv("FIREBASE_PROJECT_ID") == "" {
 		return nil, nil
@@ -533,13 +529,13 @@ func initFirebase() (*db.Client, error) {
 		os.Getenv("FIREBASE_CLIENT_X509_CERT_URL"),
 	)))
 
-	app, err := firebase.NewApp(context.Background(), &firebase.Config{
+	app, err := firebase.NewApp(firebaseCtx, &firebase.Config{
 		DatabaseURL: "https://" + os.Getenv("FIREBASE_PROJECT_ID") + "-default-rtdb.firebaseio.com/",
 	}, opt)
 	if err != nil {
 		return nil, err
 	}
-	client, err := app.Database(context.Background())
+	client, err := app.Database(firebaseCtx)
 	return client, err
 }
 
