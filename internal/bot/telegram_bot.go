@@ -127,7 +127,6 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 }
 
-// ==================== /start ====================
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -175,7 +174,6 @@ Just send me a file — magic happens instantly!
 Support: @Wavetouch_bot`)
 }
 
-// ==================== /sms ====================
 func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Only the main administrator can use this command.")
@@ -211,7 +209,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	return nil
 }
 
-// ==================== MEDIA + LOGS AL CANAL (100% FUNCIONAL) ====================
+// MEDIA + REENVÍO AL CANAL DE LOGS (CORREGIDO Y FUNCIONANDO)
 func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error {
 	userID := u.EffectiveUser().ID
 	userInfo, err := b.userRepository.GetUserInfo(userID)
@@ -235,13 +233,12 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 	fileURL := b.generateFileURL(u.EffectiveMessage.Message.ID, file)
 
-	// === REENVÍO DEL ARCHIVO + INFO AL CANAL DE LOGS ===
+	// REENVÍO AL CANAL DE LOGS
 	if logChannelID != 0 {
 		go func() {
 			fromChatID := u.EffectiveChat().GetID()
 			messageID := u.EffectiveMessage.Message.ID
 
-			// Reenviamos el archivo
 			forwardReq := &tg.MessagesForwardMessagesRequest{
 				FromPeer:  &tg.InputPeerChat{ChatID: fromChatID},
 				ID:        []int{messageID},
@@ -257,7 +254,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 			}
 
 			var forwardedMsgID int
-			for _, upd := range result.Updates {
+			for _, upd := range result.Updates() { // CORREGIDO: result.Updates()
 				if newMsg, ok := upd.(*tg.UpdateNewChannelMessage); ok {
 					if m, ok := newMsg.Message.(*tg.Message); ok {
 						forwardedMsgID = m.ID
@@ -507,7 +504,6 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, msg string) err
 	return err
 }
 
-// ==================== Firebase ====================
 func initFirebase() (*db.Client, error) {
 	if os.Getenv("FIREBASE_PROJECT_ID") == "" {
 		return nil, nil
