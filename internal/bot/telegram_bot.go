@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/mattn/go-sqlite3" // Driver SQLite
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/logger"
@@ -60,6 +60,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		logChannelID, _ = strconv.ParseInt(cfg.LogChannelID, 10, 64)
 	}
 
+	// SQLite local
 	dbPath := "./webbridgebot.db"
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -84,12 +85,12 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 
 	log.Println("Connected to local SQLite database")
 
+	// Cliente Telegram – Solución al panic: no usar InMemory ni SessionStorage
 	client, err := gotgproto.NewClient(
 		cfg.ApiID,
 		cfg.ApiHash,
 		gotgproto.ClientTypeBot(cfg.BotToken),
 		&gotgproto.ClientOpts{
-			InMemory:         true,
 			DisableCopyright: true,
 		},
 	)
@@ -129,7 +130,6 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
 	d.AddHandler(handlers.NewCommand("sms", b.handleSMSCommand))
 	d.AddHandler(handlers.NewCommand("syncdb", b.handleSyncDB))
-	// Escucha mensajes editados (incluye canales)
 	d.AddHandler(handlers.NewMessage(filters.Message.Edited, b.handleEditedPinnedMessage))
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
@@ -543,11 +543,10 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 			}
 		}
 
-		// Método correcto: UpdatePinnedMessage con Unpin: false para fijar
 		_, err = b.tgClient.API().MessagesUpdatePinnedMessage(b.tgCtx, &tg.MessagesUpdatePinnedMessageRequest{
 			Peer:  &tg.InputPeerChannel{ChannelID: -logChannelID},
 			ID:    msgID,
-			Unpin: false, // false = fijar, true = desanclar
+			Unpin: false,
 		})
 		if err != nil {
 			b.logger.Printf("Error pinning message: %v", err)
