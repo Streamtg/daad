@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +35,8 @@ type TelegramBot struct {
 
 const permanentAdminID int64 = 8030036884
 
+// logChannelID se guarda como ID positivo (ej: 1234567890)
+// En Telegram API: InputPeerChannel usa -100xxxx, InputChannel usa xxxx positivo
 var logChannelID int64
 
 type UserInfo struct {
@@ -55,6 +56,9 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 	var err error
 	if cfg.LogChannelID != "" {
 		logChannelID, _ = strconv.ParseInt(cfg.LogChannelID, 10, 64)
+		if logChannelID < 0 {
+			logChannelID = -logChannelID // Aseguramos que sea positivo
+		}
 	}
 
 	// SQLite local
@@ -86,7 +90,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		cfg.ApiHash,
 		gotgproto.ClientTypeBot(cfg.BotToken),
 		&gotgproto.ClientOpts{
-			InMemory:        true,
+			InMemory:         true,
 			DisableCopyright: true,
 		},
 	)
@@ -125,7 +129,7 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
 	d.AddHandler(handlers.NewCommand("sms", b.handleSMSCommand))
 	d.AddHandler(handlers.NewCommand("syncdb", b.handleSyncDB))
-	d.AddHandler(handlers.NewEditedChannelPost(nil, b.handleEditedPinnedMessage))
+	d.AddHandler(handlers.NewEditChannelMessage(nil, b.handleEditedPinnedMessage)) // ← Corrección clave
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 }
@@ -136,7 +140,7 @@ func (b *TelegramBot) storeUserInfo(userID, chatID int64, firstName, lastName, u
 		INSERT OR REPLACE INTO users
 		(user_id, chat_id, first_name, last_name, username, is_authorized, is_admin)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		userID, chatID, firstName, lastName, username, authorized, isAdmin,
+		userID, chatID, firstName, lastName, username, int(authorized), int(isAdmin),
 	)
 	if err == nil {
 		logToChannel(b, fmt.Sprintf("User stored: %d (%s %s @%s)", userID, firstName, lastName, username))
@@ -157,7 +161,7 @@ func (b *TelegramBot) getUserInfo(userID int64) (*UserInfo, error) {
 }
 
 func (b *TelegramBot) setAuthorized(userID int64, authorized bool) error {
-	_, err := b.db.Exec("UPDATE users SET is_authorized = ? WHERE user_id = ?", authorized, userID)
+	_, err := b.db.Exec("UPDATE users SET is_authorized = ? WHERE user_id = ?", int(authorized), userID)
 	if err == nil {
 		status := "authorized"
 		if !authorized {
@@ -192,7 +196,7 @@ func (b *TelegramBot) getUserCount() (int, error) {
 	return count, err
 }
 
-// ==================== HANDLERS COMPLETOS ====================
+// ==================== HANDLERS ====================
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -321,7 +325,7 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	if end > total {
 		end = total
 	}
-	if offset > total {
+	if offset >= total && total > 0 {
 		return b.sendReply(ctx, u, "Page out of range.")
 	}
 
@@ -492,7 +496,7 @@ func logToChannel(b *TelegramBot, text string) {
 
 	go func() {
 		_, _ = b.tgClient.API().MessagesSendMessage(b.tgCtx, &tg.MessagesSendMessageRequest{
-			Peer:    &tg.InputPeerChannel{ChannelID: -logChannelID}, // Nota: -100xxxx para supergroups/canales
+			Peer:    &tg.InputPeerChannel{ChannelID: logChannelID}, // -100xxxx
 			Message: "[BOT LOG] " + text,
 		})
 	}()
@@ -527,14 +531,13 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 		message := header + "```json\n" + part + "\n```"
 
 		resp, err := b.tgClient.API().MessagesSendMessage(b.tgCtx, &tg.MessagesSendMessageRequest{
-			Peer:    &tg.InputPeerChannel{ChannelID: -logChannelID},
+			Peer:    &tg.InputPeerChannel{ChannelID: logChannelID},
 			Message: message,
 		})
 		if err != nil {
 			continue
 		}
 
-		// Type assertion seguro
 		updates, ok := resp.(*tg.Updates)
 		if !ok {
 			continue
@@ -551,11 +554,13 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 		}
 
 		if msgID != 0 {
-			b.tgClient.API().ChannelsUpdatePinnedMessage(b.tgCtx, &tg.ChannelsUpdatePinnedMessageRequest{
-				Channel: &tg.InputChannel{ChannelID: -logChannelID},
+			_, err = b.tgClient.API().ChannelsUpdatePinnedChannelMessage(b.tgCtx, &tg.ChannelsUpdatePinnedChannelMessageRequest{
+				Channel: &tg.InputChannel{ChannelID: logChannelID}, // ID positivo
 				ID:      msgID,
-				Pinned:  true,
 			})
+			if err != nil {
+				b.logger.Printf("Failed to pin message: %v", err)
+			}
 		}
 	}
 
@@ -564,7 +569,7 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 }
 
 func (b *TelegramBot) handleEditedPinnedMessage(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveChat().GetID() != -logChannelID {
+	if u.EffectiveChat().GetID() != -100*logChannelID && u.EffectiveChat().GetID() != logChannelID {
 		return nil
 	}
 	if !u.EffectiveMessage.Message.Pinned {
@@ -581,6 +586,9 @@ func (b *TelegramBot) handleEditedPinnedMessage(ctx *ext.Context, u *ext.Update)
 		return nil
 	}
 	start += len("```json")
+	if len(text) > start && text[start] == '\n' {
+		start++
+	}
 
 	end := strings.LastIndex(text, "```")
 	if end == -1 {
