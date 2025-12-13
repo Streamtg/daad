@@ -2,7 +2,6 @@
 package config
 
 import (
-	"fmt"
 	"webBridgeBot/internal/logger"
 	"webBridgeBot/internal/reader"
 
