@@ -86,14 +86,13 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 
 	log.Println("Connected to local SQLite database")
 
-	// Cliente Telegram – SOLUCIÓN DEFINITIVA AL PANIC
-	// Usamos sessionMaker.MemorySession() para sesión en memoria segura
+	// Cliente Telegram – FORMA CORRECTA Y DEFINITIVA (sin panic)
 	client, err := gotgproto.NewClient(
 		cfg.ApiID,
 		cfg.ApiHash,
 		gotgproto.ClientTypeBot(cfg.BotToken),
-		&gotgproto.ClientOpts{
-			SessionStorage:   sessionMaker.MemorySession(), // ← Esta línea soluciona el panic
+		gotgproto.ClientOpts{
+			Session:          sessionMaker.MemorySession(), // ← Aquí va la sesión en memoria
 			DisableCopyright: true,
 		},
 	)
