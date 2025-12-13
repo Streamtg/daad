@@ -1,3 +1,4 @@
+// internal/config/config.go
 package config
 
 import (
@@ -16,25 +17,40 @@ import (
 const DefaultChunkSize int64 = 256 * 1024 // 256 KB
 
 type Configuration struct {
-	ApiID          int
-	ApiHash        string
-	BotToken       string
-	BaseURL        string
-	Port           string
-	HashLength     int
+	// Telegram
+	ApiID    int
+	ApiHash  string
+	BotToken string
+
+	// Web Server
+	BaseURL    string
+	Port       string
+	HashLength int
+
+	// Cache
 	CacheDirectory string
 	MaxCacheSize   int64
-	DatabasePath   string
-	DebugMode      bool
-	LogLevel       string // Log level: DEBUG, INFO, WARNING, ERROR
-	BinaryCache    *reader.BinaryCache
-	LogChannelID   string
+
+	// Supabase (PostgreSQL) - NUEVOS CAMPOS
+	SupabaseHost     string
+	SupabasePort     string
+	SupabaseUser     string
+	SupabasePassword string
+	SupabaseDatabase string
+
+	// Otros
+	DebugMode    bool
+	LogLevel     string // Log level: DEBUG, INFO, WARNING, ERROR
+	LogChannelID string
 
 	// Connection and retry settings
 	RequestTimeout int // Timeout for Telegram API requests in seconds
 	MaxRetries     int // Maximum number of retry attempts for failed requests
 	RetryBaseDelay int // Base delay for exponential backoff in seconds
 	MaxRetryDelay  int // Maximum retry delay in seconds
+
+	// Interno
+	BinaryCache *reader.BinaryCache
 }
 
 // InitializeViper sets up Viper to read from environment variables and the .env file.
@@ -51,7 +67,6 @@ func InitializeViper(log *logger.Logger) {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 			log.Info(".env config file not found (this is expected if configuration is solely via environment variables or command-line flags).")
 		} else {
-			// Handle other errors like file not existing or permission issues
 			log.Infof("Could not read .env file: %v", err)
 			log.Info("Hint: If you need to use a .env file, copy env.sample to .env and configure it.")
 		}
@@ -59,46 +74,58 @@ func InitializeViper(log *logger.Logger) {
 	} else {
 		log.Info("Successfully loaded configuration from .env file")
 	}
-	// Note: `viper.BindPFlags` will be called in main.go after flags are defined.
 }
 
 // LoadConfig loads configuration from Viper's resolved settings.
-// Viper should have already read from files, environment variables, and command-line flags.
 func LoadConfig(log *logger.Logger) Configuration {
 	var cfg Configuration
 
-	// Direct assignments from Viper's resolved values
-	// Use lowercase for Viper keys as they are typically derived from flag names
-	// or environment variable names (if using AutomaticEnv).
-	cfg.ApiID = viper.GetInt("api_id")
-	cfg.ApiHash = viper.GetString("api_hash")
-	cfg.BotToken = viper.GetString("bot_token")
-	cfg.BaseURL = viper.GetString("base_url")
-	cfg.Port = viper.GetString("port")
-	cfg.HashLength = viper.GetInt("hash_length")
-	cfg.CacheDirectory = viper.GetString("cache_directory")
-	cfg.MaxCacheSize = viper.GetInt64("max_cache_size")
-	cfg.DebugMode = viper.GetBool("debug_mode")
-	cfg.LogLevel = viper.GetString("log_level")
-	cfg.LogChannelID = viper.GetString("log_channel_id")
+	// Telegram
+	cfg.ApiID = viper.GetInt("API_ID")
+	cfg.ApiHash = viper.GetString("API_HASH")
+	cfg.BotToken = viper.GetString("BOT_TOKEN")
 
-	// Connection and retry settings
-	cfg.RequestTimeout = viper.GetInt("request_timeout")
-	cfg.MaxRetries = viper.GetInt("max_retries")
-	cfg.RetryBaseDelay = viper.GetInt("retry_base_delay")
-	cfg.MaxRetryDelay = viper.GetInt("max_retry_delay")
+	// Web Server
+	cfg.BaseURL = viper.GetString("BASE_URL")
+	cfg.Port = viper.GetString("PORT")
+	cfg.HashLength = viper.GetInt("HASH_LENGTH")
 
-	// Apply default values if not set by any source (flags, env, file)
+	// Cache
+	cfg.CacheDirectory = viper.GetString("CACHE_DIRECTORY")
+	cfg.MaxCacheSize = viper.GetInt64("MAX_CACHE_SIZE")
+
+	// Supabase - NUEVO: carga desde Viper
+	cfg.SupabaseHost = viper.GetString("SUPABASE_HOST")
+	cfg.SupabasePort = viper.GetString("SUPABASE_PORT")
+	cfg.SupabaseUser = viper.GetString("SUPABASE_USER")
+	cfg.SupabasePassword = viper.GetString("SUPABASE_PASSWORD")
+	cfg.SupabaseDatabase = viper.GetString("SUPABASE_DATABASE")
+
+	// Otros
+	cfg.DebugMode = viper.GetBool("DEBUG_MODE")
+	cfg.LogLevel = viper.GetString("LOG_LEVEL")
+	cfg.LogChannelID = viper.GetString("LOG_CHANNEL_ID")
+
+	// Connection settings
+	cfg.RequestTimeout = viper.GetInt("REQUEST_TIMEOUT")
+	cfg.MaxRetries = viper.GetInt("MAX_RETRIES")
+	cfg.RetryBaseDelay = viper.GetInt("RETRY_BASE_DELAY")
+	cfg.MaxRetryDelay = viper.GetInt("MAX_RETRY_DELAY")
+
+	// Aplicar valores por defecto
 	setDefaultValues(&cfg)
 
-	// Validate after all sources (flags, env, defaults) have been applied
+	// Validar campos obligatorios (incluyendo Supabase)
 	validateMandatoryFields(cfg, log)
 
-	// Initialize BinaryCache after all config values are final
+	// Inicializar caché binario
 	initializeBinaryCache(&cfg, log)
 
 	if cfg.DebugMode {
-		log.Debugf("Loaded configuration: %+v", cfg)
+		// No imprimir password en debug
+		safeCfg := cfg
+		safeCfg.SupabasePassword = "*****"
+		log.Debugf("Loaded configuration: %+v", safeCfg)
 	}
 
 	return cfg
@@ -117,6 +144,16 @@ func validateMandatoryFields(cfg Configuration, log *logger.Logger) {
 	if cfg.BaseURL == "" {
 		log.Fatal("BASE_URL is required and not set")
 	}
+	// Validación Supabase
+	if cfg.SupabaseHost == "" {
+		log.Fatal("SUPABASE_HOST is required")
+	}
+	if cfg.SupabaseUser == "" {
+		log.Fatal("SUPABASE_USER is required")
+	}
+	if cfg.SupabasePassword == "" {
+		log.Fatal("SUPABASE_PASSWORD is required")
+	}
 }
 
 func setDefaultValues(cfg *Configuration) {
@@ -127,13 +164,8 @@ func setDefaultValues(cfg *Configuration) {
 		cfg.CacheDirectory = ".cache"
 	}
 	if cfg.MaxCacheSize == 0 {
-		cfg.MaxCacheSize = 10 * 1024 * 1024 * 1024 // 10 GB default
+		cfg.MaxCacheSize = 10 * 1024 * 1024 * 1024 // 10 GB
 	}
-	if cfg.DatabasePath == "" {
-		cfg.DatabasePath = fmt.Sprintf("%s/webBridgeBot.db", cfg.CacheDirectory)
-	}
-	// This default for Port is now handled by Cobra's flag definition in main.go
-	// but keeping a fallback here is harmless if cfg.Port is somehow still empty
 	if cfg.Port == "" {
 		cfg.Port = "8080"
 	}
@@ -144,19 +176,27 @@ func setDefaultValues(cfg *Configuration) {
 			cfg.LogLevel = "INFO"
 		}
 	}
-	
-	// Connection and retry defaults
+
+	// Supabase defaults
+	if cfg.SupabasePort == "" {
+		cfg.SupabasePort = "5432"
+	}
+	if cfg.SupabaseDatabase == "" {
+		cfg.SupabaseDatabase = "postgres"
+	}
+
+	// Connection defaults
 	if cfg.RequestTimeout == 0 {
-		cfg.RequestTimeout = 300 // 5 minutes default timeout
+		cfg.RequestTimeout = 300
 	}
 	if cfg.MaxRetries == 0 {
-		cfg.MaxRetries = 5 // 5 retry attempts by default
+		cfg.MaxRetries = 5
 	}
 	if cfg.RetryBaseDelay == 0 {
-		cfg.RetryBaseDelay = 1 // 1 second base delay
+		cfg.RetryBaseDelay = 1
 	}
 	if cfg.MaxRetryDelay == 0 {
-		cfg.MaxRetryDelay = 60 // 60 seconds max delay
+		cfg.MaxRetryDelay = 60
 	}
 }
 
