@@ -21,6 +21,7 @@ import (
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/dispatcher/handlers/filters"
 	"github.com/celestix/gotgproto/ext"
+	"github.com/celestix/gotgproto/sessionMaker"
 	"github.com/gotd/td/tg"
 	"github.com/joho/godotenv"
 )
@@ -85,12 +86,14 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 
 	log.Println("Connected to local SQLite database")
 
-	// Cliente Telegram – Solución al panic: no usar InMemory ni SessionStorage
+	// Cliente Telegram – SOLUCIÓN DEFINITIVA AL PANIC
+	// Usamos sessionMaker.MemorySession() para sesión en memoria segura
 	client, err := gotgproto.NewClient(
 		cfg.ApiID,
 		cfg.ApiHash,
 		gotgproto.ClientTypeBot(cfg.BotToken),
 		&gotgproto.ClientOpts{
+			SessionStorage:   sessionMaker.MemorySession(), // ← Esta línea soluciona el panic
 			DisableCopyright: true,
 		},
 	)
