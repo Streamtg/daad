@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3" // Driver SQLite
+	_ "github.com/mattn/go-sqlite3"
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/logger"
@@ -85,15 +85,13 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 
 	log.Println("Connected to local SQLite database")
 
-	// Cliente Telegram – SESIÓN EN MEMORIA (se crea automáticamente si no existe)
+	// Cliente Telegram – SOLUCIÓN DEFINITIVA AL PANIC EN BETA
+	// Pasamos nil como último argumento para sesión en memoria segura
 	client, err := gotgproto.NewClient(
 		cfg.ApiID,
 		cfg.ApiHash,
 		gotgproto.ClientTypeBot(cfg.BotToken),
-		&gotgproto.ClientOpts{
-			DisableCopyright: true,
-			// gotgproto crea automáticamente la sesión en memoria para bots si no se especifica nada
-		},
+		nil, // ← Esto activa sesión en memoria por defecto sin bug
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Telegram client: %w", err)
