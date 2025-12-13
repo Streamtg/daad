@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq" // <-- IMPORTANTE: registra el driver PostgreSQL para sql.Open("postgres", ...)
+	_ "github.com/lib/pq" // Driver PostgreSQL (obligatorio)
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/data"
@@ -50,13 +50,12 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		logChannelID, _ = strconv.ParseInt(cfg.LogChannelID, 10, 64)
 	}
 
-	// Conexión a Supabase usando los campos cargados por Viper
-	dsn := fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=require",
+	// === CONEXIÓN A SUPABASE CORREGIDA (formato URI para evitar problemas IPv6) ===
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=require&connect_timeout=10",
+		url.QueryEscape(cfg.SupabaseUser),
+		url.QueryEscape(cfg.SupabasePassword),
 		cfg.SupabaseHost,
 		cfg.SupabasePort,
-		cfg.SupabaseUser,
-		cfg.SupabasePassword,
 		cfg.SupabaseDatabase,
 	)
 
@@ -65,7 +64,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		return nil, fmt.Errorf("failed to open Supabase database: %w", err)
 	}
 
-	// Configuración óptima del pool de conexiones
+	// Pool de conexiones optimizado
 	db.SetMaxOpenConns(20)
 	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(time.Hour)
@@ -75,7 +74,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 	}
 	log.Println("Connected to Supabase PostgreSQL successfully")
 
-	// Cliente Telegram con sesión en memoria
+	// Cliente Telegram
 	client, err := gotgproto.NewClient(
 		cfg.ApiID,
 		cfg.ApiHash,
