@@ -18,7 +18,6 @@ import (
 	"webBridgeBot/internal/web"
 
 	"github.com/celestix/gotgproto"
-	"github.com/celestix/gotgproto/dispatcher"
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/dispatcher/handlers/filters"
 	"github.com/celestix/gotgproto/ext"
@@ -130,8 +129,8 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
 	d.AddHandler(handlers.NewCommand("sms", b.handleSMSCommand))
 	d.AddHandler(handlers.NewCommand("syncdb", b.handleSyncDB))
-	// Escucha ediciones en mensajes (incluye canales si el bot es admin)
-	d.AddHandler(handlers.NewEditedMessage(nil, b.handleEditedPinnedMessage))
+	// Escucha mensajes editados (incluye canales)
+	d.AddHandler(handlers.NewMessage(filters.Message.Edited, b.handleEditedPinnedMessage))
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 }
@@ -544,11 +543,11 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 			}
 		}
 
-		// MÉTODO CORRECTO PARA FIJAR EN CANAL
+		// Método correcto: UpdatePinnedMessage con Unpin: false para fijar
 		_, err = b.tgClient.API().MessagesUpdatePinnedMessage(b.tgCtx, &tg.MessagesUpdatePinnedMessageRequest{
-			Peer:   &tg.InputPeerChannel{ChannelID: -logChannelID},
-			ID:     msgID,
-			Pinned: true,
+			Peer:  &tg.InputPeerChannel{ChannelID: -logChannelID},
+			ID:    msgID,
+			Unpin: false, // false = fijar, true = desanclar
 		})
 		if err != nil {
 			b.logger.Printf("Error pinning message: %v", err)
@@ -559,10 +558,9 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 	return nil
 }
 
-// Escucha ediciones en cualquier mensaje (incluye canales)
 func (b *TelegramBot) handleEditedPinnedMessage(ctx *ext.Context, u *ext.Update) error {
 	msg := u.EffectiveMessage.Message
-	if msg == nil || !msg.Pinned || u.EffectiveChat().GetID() != -logChannelID {
+	if msg == nil || u.EffectiveChat().GetID() != -logChannelID {
 		return nil
 	}
 
@@ -592,6 +590,6 @@ func (b *TelegramBot) handleEditedPinnedMessage(ctx *ext.Context, u *ext.Update)
 		_ = b.storeUserInfo(usr.UserID, usr.ChatID, usr.FirstName, usr.LastName, usr.Username, usr.IsAuthorized, usr.IsAdmin)
 	}
 
-	logToChannel("DB actualizada desde mensaje fijado editado")
+	logToChannel("DB actualizada desde mensaje editado")
 	return nil
 }
