@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3" // Driver SQLite
-
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/logger"
 	"webBridgeBot/internal/types"
@@ -36,10 +36,7 @@ type TelegramBot struct {
 
 const permanentAdminID int64 = 8030036884
 
-var (
-	logChannelID int64
-	botInstance  *TelegramBot
-)
+var logChannelID int64
 
 type UserInfo struct {
 	UserID       int64  `json:"user_id"`
@@ -60,6 +57,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		logChannelID, _ = strconv.ParseInt(cfg.LogChannelID, 10, 64)
 	}
 
+	// SQLite local
 	dbPath := "./webbridgebot.db"
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -81,7 +79,6 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table: %w", err)
 	}
-
 	log.Println("Connected to local SQLite database")
 
 	client, err := gotgproto.NewClient(
@@ -89,7 +86,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		cfg.ApiHash,
 		gotgproto.ClientTypeBot(cfg.BotToken),
 		&gotgproto.ClientOpts{
-			InMemory:         true,
+			InMemory:        true,
 			DisableCopyright: true,
 		},
 	)
@@ -109,7 +106,6 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		webServer: webSrv,
 	}
 
-	botInstance = b
 	return b, nil
 }
 
@@ -129,22 +125,21 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
 	d.AddHandler(handlers.NewCommand("sms", b.handleSMSCommand))
 	d.AddHandler(handlers.NewCommand("syncdb", b.handleSyncDB))
-	d.AddHandler(handlers.NewEditedMessage(filters.Message.InChannels, b.handleEditedPinnedMessage)) // Corregido: ediciones en canales
+	d.AddHandler(handlers.NewEditedChannelPost(nil, b.handleEditedPinnedMessage))
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 }
 
 // ==================== USER MANAGEMENT ====================
-
 func (b *TelegramBot) storeUserInfo(userID, chatID int64, firstName, lastName, username string, authorized, isAdmin bool) error {
 	_, err := b.db.Exec(`
-		INSERT OR REPLACE INTO users 
+		INSERT OR REPLACE INTO users
 		(user_id, chat_id, first_name, last_name, username, is_authorized, is_admin)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		userID, chatID, firstName, lastName, username, authorized, isAdmin,
 	)
 	if err == nil {
-		logToChannel(fmt.Sprintf("User stored: %d (%s %s @%s)", userID, firstName, lastName, username))
+		logToChannel(b, fmt.Sprintf("User stored: %d (%s %s @%s)", userID, firstName, lastName, username))
 	}
 	return err
 }
@@ -152,7 +147,7 @@ func (b *TelegramBot) storeUserInfo(userID, chatID int64, firstName, lastName, u
 func (b *TelegramBot) getUserInfo(userID int64) (*UserInfo, error) {
 	var u UserInfo
 	err := b.db.QueryRow(`
-		SELECT user_id, chat_id, first_name, last_name, username, is_authorized, is_admin, created_at 
+		SELECT user_id, chat_id, first_name, last_name, username, is_authorized, is_admin, created_at
 		FROM users WHERE user_id = ?`, userID).
 		Scan(&u.UserID, &u.ChatID, &u.FirstName, &u.LastName, &u.Username, &u.IsAuthorized, &u.IsAdmin, &u.CreatedAt)
 	if err == sql.ErrNoRows {
@@ -168,7 +163,7 @@ func (b *TelegramBot) setAuthorized(userID int64, authorized bool) error {
 		if !authorized {
 			status = "banned"
 		}
-		logToChannel(fmt.Sprintf("User %d %s", userID, status))
+		logToChannel(b, fmt.Sprintf("User %d %s", userID, status))
 	}
 	return err
 }
@@ -198,7 +193,6 @@ func (b *TelegramBot) getUserCount() (int, error) {
 }
 
 // ==================== HANDLERS COMPLETOS ====================
-
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -209,12 +203,10 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 	_ = b.storeUserInfo(user.ID, u.EffectiveChat().GetID(), user.FirstName, user.LastName, user.Username, true, isAdmin)
 
 	welcome := `Send or forward any multimedia file (audio or video) and I will instantly generate a direct streaming link for you at lightning speed.
-
 Supported formats:
 • Audio: MP3, M4A, FLAC, WAV, OGG...
 • Video: MP4, MKV, AVI, MOV, WEBM...
 • Photos & documents (sent as files)
-
 Just send me a file — magic happens instantly!
 Support: @Wavetouch_bot`
 
@@ -251,7 +243,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	b.sendReply(ctx, u, fmt.Sprintf("Message sent to %d users.", sent))
-	logToChannel(fmt.Sprintf("Broadcast sent to %d users", sent))
+	logToChannel(b, fmt.Sprintf("Broadcast sent to %d users", sent))
 	return nil
 }
 
@@ -269,6 +261,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 	if err != nil || targetID <= 0 {
 		return b.sendReply(ctx, u, "Invalid user ID.")
 	}
+
 	if targetID == permanentAdminID {
 		return b.sendReply(ctx, u, "Cannot ban the main administrator.")
 	}
@@ -280,7 +273,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 
 	_ = b.setAuthorized(targetID, false)
 	b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nReason: %s", targetID, reason))
-	logToChannel(fmt.Sprintf("Admin banned user %d – %s", targetID, reason))
+	logToChannel(b, fmt.Sprintf("Admin banned user %d – %s", targetID, reason))
 	return nil
 }
 
@@ -301,7 +294,7 @@ func (b *TelegramBot) handleUnbanUser(ctx *ext.Context, u *ext.Update) error {
 
 	_ = b.setAuthorized(targetID, true)
 	b.sendReply(ctx, u, fmt.Sprintf("User %d has been unbanned.", targetID))
-	logToChannel(fmt.Sprintf("Admin unbanned user %d", targetID))
+	logToChannel(b, fmt.Sprintf("Admin unbanned user %d", targetID))
 	return nil
 }
 
@@ -320,13 +313,18 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	total, _ := b.getUserCount()
+	offset := (page - 1) * pageSize
+
 	users, _ := b.getAllUsers()
 
-	offset := (page - 1) * pageSize
 	end := offset + pageSize
 	if end > total {
 		end = total
 	}
+	if offset > total {
+		return b.sendReply(ctx, u, "Page out of range.")
+	}
+
 	pageUsers := users[offset:end]
 
 	var sb strings.Builder
@@ -347,6 +345,7 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 		sb.WriteString(fmt.Sprintf("%d. `%d` - %s %s (%s) - %s%s\n",
 			offset+i+1, usr.UserID, usr.FirstName, usr.LastName, username, status, admin))
 	}
+
 	pages := (total + pageSize - 1) / pageSize
 	sb.WriteString(fmt.Sprintf("\nPage %d/%d (%d total users)", page, pages, total))
 
@@ -377,10 +376,12 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	if !info.IsAuthorized {
 		status = "Banned"
 	}
+
 	admin := "No"
 	if info.IsAdmin {
 		admin = "Yes"
 	}
+
 	username := "N/A"
 	if info.Username != "" {
 		username = "@" + info.Username
@@ -427,6 +428,7 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 func (b *TelegramBot) handleAnyUpdate(*ext.Context, *ext.Update) error { return nil }
 
+// ==================== UTILIDADES ====================
 func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile) error {
 	proxied := b.wrapWithProxyIfNeeded(fileURL)
 
@@ -438,11 +440,12 @@ func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL s
 
 	_, err := ctx.Reply(u, ext.ReplyTextString(proxied), &ext.ReplyOpts{Markup: &keyboard})
 	if err != nil {
-		b.logger.Printf("Failed to send streaming link: %v", err)
+		b.logger.Printf("Failed to send link: %v", err)
 	}
 
 	wsMsg := b.constructWebSocketMessage(proxied, file)
 	b.webServer.GetWSManager().PublishMessage(u.EffectiveUser().ID, wsMsg)
+
 	return err
 }
 
@@ -482,20 +485,20 @@ func (b *TelegramBot) sendReply(ctx *ext.Context, u *ext.Update, text string) er
 	return err
 }
 
-func logToChannel(text string) {
-	if logChannelID == 0 || botInstance == nil {
+func logToChannel(b *TelegramBot, text string) {
+	if logChannelID == 0 || b == nil {
 		return
 	}
+
 	go func() {
-		_, _ = botInstance.tgClient.API().MessagesSendMessage(botInstance.tgCtx, &tg.MessagesSendMessageRequest{
-			Peer:    &tg.InputPeerChannel{ChannelID: -logChannelID},
+		_, _ = b.tgClient.API().MessagesSendMessage(b.tgCtx, &tg.MessagesSendMessageRequest{
+			Peer:    &tg.InputPeerChannel{ChannelID: -logChannelID}, // Nota: -100xxxx para supergroups/canales
 			Message: "[BOT LOG] " + text,
 		})
 	}()
 }
 
 // ==================== SINCRONIZACIÓN DB ====================
-
 func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 	if u.EffectiveUser().ID != permanentAdminID {
 		return b.sendReply(ctx, u, "Solo el admin principal puede usar /syncdb")
@@ -506,7 +509,7 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 		return b.sendReply(ctx, u, "Error leyendo DB")
 	}
 
-	jsonData, _ := json.MarshalIndent(users, "", "  ")
+	jsonData, _ := json.MarshalIndent(users, "", " ")
 	dataStr := string(jsonData)
 
 	const maxLen = 4000
@@ -531,9 +534,14 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 			continue
 		}
 
-		update := resp.(*tg.Updates)
+		// Type assertion seguro
+		updates, ok := resp.(*tg.Updates)
+		if !ok {
+			continue
+		}
+
 		var msgID int
-		for _, upd := range update.Updates {
+		for _, upd := range updates.Updates {
 			if um, ok := upd.(*tg.UpdateNewChannelMessage); ok {
 				if m, ok := um.Message.(*tg.Message); ok {
 					msgID = m.ID
@@ -542,14 +550,12 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 			}
 		}
 
-		// Método correcto para fijar mensaje en canal
-		_, err = b.tgClient.API().ChannelsUpdatePinnedMessage(b.tgCtx, &tg.ChannelsUpdatePinnedMessageRequest{
-			Channel: &tg.InputChannel{ChannelID: -logChannelID},
-			ID:      msgID,
-			Pinned:  true,
-		})
-		if err != nil {
-			b.logger.Printf("Error pinning message: %v", err)
+		if msgID != 0 {
+			b.tgClient.API().ChannelsUpdatePinnedMessage(b.tgCtx, &tg.ChannelsUpdatePinnedMessageRequest{
+				Channel: &tg.InputChannel{ChannelID: -logChannelID},
+				ID:      msgID,
+				Pinned:  true,
+			})
 		}
 	}
 
@@ -561,7 +567,7 @@ func (b *TelegramBot) handleEditedPinnedMessage(ctx *ext.Context, u *ext.Update)
 	if u.EffectiveChat().GetID() != -logChannelID {
 		return nil
 	}
-	if u.EffectiveMessage.Message == nil || !u.EffectiveMessage.Message.Pinned {
+	if !u.EffectiveMessage.Message.Pinned {
 		return nil
 	}
 
@@ -575,15 +581,16 @@ func (b *TelegramBot) handleEditedPinnedMessage(ctx *ext.Context, u *ext.Update)
 		return nil
 	}
 	start += len("```json")
+
 	end := strings.LastIndex(text, "```")
 	if end == -1 {
 		return nil
 	}
-	jsonStr := text[start:end]
 
+	jsonStr := text[start:end]
 	var users []UserInfo
 	if err := json.Unmarshal([]byte(jsonStr), &users); err != nil {
-		logToChannel("Error parsing edited JSON dump")
+		logToChannel(b, "Error parsing edited JSON dump")
 		return nil
 	}
 
@@ -591,6 +598,6 @@ func (b *TelegramBot) handleEditedPinnedMessage(ctx *ext.Context, u *ext.Update)
 		_ = b.storeUserInfo(usr.UserID, usr.ChatID, usr.FirstName, usr.LastName, usr.Username, usr.IsAuthorized, usr.IsAdmin)
 	}
 
-	logToChannel("DB actualizada desde mensaje fijado editado")
+	logToChannel(b, "DB actualizada desde mensaje fijado editado")
 	return nil
 }
