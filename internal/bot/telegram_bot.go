@@ -61,7 +61,6 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		logChannelID, _ = strconv.ParseInt(cfg.LogChannelID, 10, 64)
 	}
 
-	// SQLite local
 	dbPath := "./webbridgebot.db"
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -322,10 +321,9 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	total, _ := b.getUserCount()
-	offset := (page - 1) * pageSize
 	users, _ := b.getAllUsers()
 
-	// Paginación simple
+	offset := (page - 1) * pageSize
 	end := offset + pageSize
 	if end > total {
 		end = total
@@ -382,8 +380,7 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	}
 	admin := "No"
 	if info.IsAdmin {
-	{
-		admin = "Yes"
+		admin = "Yes" // <-- CORREGIDO: eliminado el bloque extra
 	}
 	username := "N/A"
 	if info.Username != "" {
@@ -431,8 +428,6 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 func (b *TelegramBot) handleAnyUpdate(*ext.Context, *ext.Update) error { return nil }
 
-// ==================== SINCRONIZACIÓN Y UTILIDADES ====================
-
 func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile) error {
 	proxied := b.wrapWithProxyIfNeeded(fileURL)
 
@@ -444,7 +439,7 @@ func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL s
 
 	_, err := ctx.Reply(u, ext.ReplyTextString(proxied), &ext.ReplyOpts{Markup: &keyboard})
 	if err != nil {
-		b.logger.Printf("Failed to send link: %v", err)
+		b.logger.Printf("Failed to send streaming link: %v", err)
 	}
 
 	wsMsg := b.constructWebSocketMessage(proxied, file)
@@ -537,7 +532,6 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 			continue
 		}
 
-		// Extraer ID del mensaje
 		update := resp.(*tg.Updates)
 		var msgID int
 		for _, upd := range update.Updates {
@@ -549,7 +543,6 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 			}
 		}
 
-		// Fijar
 		b.tgClient.API().ChannelsUpdatePinnedMessage(b.tgCtx, &tg.ChannelsUpdatePinnedMessageRequest{
 			Channel: &tg.InputChannel{ChannelID: -logChannelID},
 			ID:      msgID,
