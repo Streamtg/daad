@@ -2,6 +2,7 @@ package bot
 
 import (
 	"database/sql"
+	"fmt"
 	"net/url"
 	"os"
 	"strconv"
@@ -41,12 +42,14 @@ var (
 )
 
 func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot, error) {
-	_ = godotenv.Load() // Carga .env automáticamente
+	_ = godotenv.Load()
 
 	var err error
-	logChannelID, _ = strconv.ParseInt(os.Getenv("LOG_CHANNEL_ID"), 10, 64)
+	if cfg.LogChannelID != "" {
+		logChannelID, _ = strconv.ParseInt(cfg.LogChannelID, 10, 64)
+	}
 
-	// Conexión a Supabase PostgreSQL
+	// Conexión a Supabase PostgreSQL usando los campos del config existente
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=require",
 		cfg.SupabaseHost,
@@ -61,7 +64,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		return nil, fmt.Errorf("failed to open Supabase database: %w", err)
 	}
 
-	// Pool de conexiones optimizado para producción
+	// Pool de conexiones optimizado
 	db.SetMaxOpenConns(20)
 	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(time.Hour)
@@ -71,7 +74,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 	}
 	log.Println("Connected to Supabase PostgreSQL successfully")
 
-	// Cliente Telegram (sesión en memoria – ideal para bots)
+	// Cliente Telegram (sesión en memoria)
 	client, err := gotgproto.NewClient(
 		cfg.ApiID,
 		cfg.ApiHash,
@@ -126,8 +129,6 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 }
 
-// ==================== COMANDOS ====================
-
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
 	if user.ID == ctx.Self.ID {
@@ -179,8 +180,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 		return b.sendReply(ctx, u, "Usage: /sms <your message>")
 	}
 
-	// Obtener todos los usuarios autorizados desde Supabase
-	users, err := b.userRepository.GetAllUsers(0, 50000) // límite alto para broadcast
+	users, err := b.userRepository.GetAllUsers(0, 50000)
 	if err != nil {
 		return b.sendReply(ctx, u, "Error loading users from database.")
 	}
@@ -195,7 +195,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 			if err == nil {
 				sent++
 			}
-			time.Sleep(33 * time.Millisecond) // Rate limit seguro
+			time.Sleep(33 * time.Millisecond)
 		}
 	}
 
