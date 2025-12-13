@@ -1,7 +1,7 @@
 package bot
 
 import (
-	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	_ "github.com/mattn/go-sqlite3" // Driver SQLite
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/logger"
@@ -31,7 +31,7 @@ type TelegramBot struct {
 	tgClient  *gotgproto.Client
 	tgCtx     *ext.Context
 	logger    *logger.Logger
-	redis     *redis.Client
+	db        *sql.DB
 	webServer *web.Server
 }
 
@@ -40,7 +40,6 @@ const permanentAdminID int64 = 8030036884
 var (
 	logChannelID int64
 	botInstance  *TelegramBot
-	redisCtx     = context.Background()
 )
 
 type UserInfo struct {
@@ -62,26 +61,31 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		logChannelID, _ = strconv.ParseInt(cfg.LogChannelID, 10, 64)
 	}
 
-	// === CONEXIÓN A REDIS USANDO REDIS_URL (Upstash) ===
-	redisURL := os.Getenv("REDIS_URL")
-	if redisURL == "" {
-		return nil, fmt.Errorf("REDIS_URL environment variable is required")
-	}
-
-	opt, err := redis.ParseURL(redisURL)
+	// SQLite local
+	dbPath := "./webbridgebot.db"
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("invalid REDIS_URL: %w", err)
+		return nil, fmt.Errorf("failed to open SQLite: %w", err)
 	}
 
-	rdb := redis.NewClient(opt)
-
-	// Test conexión
-	if err = rdb.Ping(redisCtx).Err(); err != nil {
-		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS users (
+			user_id INTEGER PRIMARY KEY,
+			chat_id INTEGER NOT NULL,
+			first_name TEXT,
+			last_name TEXT,
+			username TEXT,
+			is_authorized INTEGER DEFAULT 1,
+			is_admin INTEGER DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create table: %w", err)
 	}
-	log.Println("Connected to Redis (Upstash) successfully")
 
-	// Cliente Telegram
+	log.Println("Connected to local SQLite database")
+
 	client, err := gotgproto.NewClient(
 		cfg.ApiID,
 		cfg.ApiHash,
@@ -95,15 +99,15 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 		return nil, fmt.Errorf("failed to create Telegram client: %w", err)
 	}
 
-	ctxTG := client.CreateContext()
-	webSrv := web.NewServer(cfg, client, ctxTG, log, nil) // Si web necesita repo, adáptalo después
+	ctx := client.CreateContext()
+	webSrv := web.NewServer(cfg, client, ctx, log, nil)
 
 	b := &TelegramBot{
 		config:    cfg,
 		tgClient:  client,
-		tgCtx:     ctxTG,
+		tgCtx:     ctx,
 		logger:    log,
-		redis:     rdb,
+		db:        db,
 		webServer: webSrv,
 	}
 
@@ -112,7 +116,7 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 }
 
 func (b *TelegramBot) Run() {
-	b.logger.Printf("Bot started @%s\n", b.tgClient.Self.Username)
+	b.logger.Printf("Bot started @%s", b.tgClient.Self.Username)
 	b.registerHandlers()
 	go b.webServer.Start()
 	b.tgClient.Idle()
@@ -126,86 +130,76 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("listusers", b.handleListUsers))
 	d.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
 	d.AddHandler(handlers.NewCommand("sms", b.handleSMSCommand))
+	d.AddHandler(handlers.NewCommand("syncdb", b.handleSyncDB))
+	d.AddHandler(handlers.NewEditedChannelPost(nil, b.handleEditedPinnedMessage))
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 }
 
-// ==================== USER MANAGEMENT CON REDIS ====================
+// ==================== USER MANAGEMENT ====================
 
 func (b *TelegramBot) storeUserInfo(userID, chatID int64, firstName, lastName, username string, authorized, isAdmin bool) error {
-	u := UserInfo{
-		UserID:       userID,
-		ChatID:       chatID,
-		FirstName:    firstName,
-		LastName:     lastName,
-		Username:     username,
-		IsAuthorized: authorized,
-		IsAdmin:      isAdmin,
-		CreatedAt:    time.Now().Format(time.RFC3339),
+	_, err := b.db.Exec(`
+		INSERT OR REPLACE INTO users 
+		(user_id, chat_id, first_name, last_name, username, is_authorized, is_admin)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		userID, chatID, firstName, lastName, username, authorized, isAdmin,
+	)
+	if err == nil {
+		logToChannel(fmt.Sprintf("User stored: %d (%s %s @%s)", userID, firstName, lastName, username))
 	}
-
-	data, err := json.Marshal(u)
-	if err != nil {
-		return err
-	}
-
-	key := fmt.Sprintf("user:%d", userID)
-	return b.redis.Set(redisCtx, key, data, 0).Err()
+	return err
 }
 
 func (b *TelegramBot) getUserInfo(userID int64) (*UserInfo, error) {
-	key := fmt.Sprintf("user:%d", userID)
-	data, err := b.redis.Get(redisCtx, key).Bytes()
-	if err == redis.Nil {
+	var u UserInfo
+	err := b.db.QueryRow(`
+		SELECT user_id, chat_id, first_name, last_name, username, is_authorized, is_admin, created_at 
+		FROM users WHERE user_id = ?`, userID).
+		Scan(&u.UserID, &u.ChatID, &u.FirstName, &u.LastName, &u.Username, &u.IsAuthorized, &u.IsAdmin, &u.CreatedAt)
+	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-
-	var u UserInfo
-	if err := json.Unmarshal(data, &u); err != nil {
-		return nil, err
-	}
-	return &u, nil
+	return &u, err
 }
 
 func (b *TelegramBot) setAuthorized(userID int64, authorized bool) error {
-	u, err := b.getUserInfo(userID)
-	if err != nil || u == nil {
-		return fmt.Errorf("user not found")
+	_, err := b.db.Exec("UPDATE users SET is_authorized = ? WHERE user_id = ?", authorized, userID)
+	if err == nil {
+		status := "authorized"
+		if !authorized {
+			status = "banned"
+		}
+		logToChannel(fmt.Sprintf("User %d %s", userID, status))
 	}
-	u.IsAuthorized = authorized
-	data, _ := json.Marshal(u)
-	return b.redis.Set(redisCtx, fmt.Sprintf("user:%d", userID), data, 0).Err()
+	return err
 }
 
 func (b *TelegramBot) getAllUsers() ([]UserInfo, error) {
-	keys, err := b.redis.Keys(redisCtx, "user:*").Result()
+	rows, err := b.db.Query("SELECT user_id, chat_id, first_name, last_name, username, is_authorized, is_admin, created_at FROM users")
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
 	var users []UserInfo
-	for _, key := range keys {
-		data, err := b.redis.Get(redisCtx, key).Bytes()
-		if err != nil {
+	for rows.Next() {
+		var u UserInfo
+		if err := rows.Scan(&u.UserID, &u.ChatID, &u.FirstName, &u.LastName, &u.Username, &u.IsAuthorized, &u.IsAdmin, &u.CreatedAt); err != nil {
 			continue
 		}
-		var u UserInfo
-		if json.Unmarshal(data, &u) == nil {
-			users = append(users, u)
-		}
+		users = append(users, u)
 	}
 	return users, nil
 }
 
 func (b *TelegramBot) getUserCount() (int, error) {
-	count, err := b.redis.Keys(redisCtx, "user:*").Result()
-	return len(count), err
+	var count int
+	err := b.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
+	return count, err
 }
 
-// ==================== HANDLERS ====================
+// ==================== HANDLERS COMPLETOS ====================
 
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
@@ -214,19 +208,7 @@ func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error 
 	}
 
 	isAdmin := user.ID == permanentAdminID
-
-	_ = b.storeUserInfo(
-		user.ID,
-		u.EffectiveChat().GetID(),
-		user.FirstName,
-		user.LastName,
-		user.Username,
-		true,
-		isAdmin,
-	)
-
-	logToChannel(fmt.Sprintf("New user: %s %s (@%s) - ID: %d",
-		user.FirstName, user.LastName, user.Username, user.ID))
+	_ = b.storeUserInfo(user.ID, u.EffectiveChat().GetID(), user.FirstName, user.LastName, user.Username, true, isAdmin)
 
 	welcome := `Send or forward any multimedia file (audio or video) and I will instantly generate a direct streaming link for you at lightning speed.
 
@@ -234,13 +216,6 @@ Supported formats:
 • Audio: MP3, M4A, FLAC, WAV, OGG...
 • Video: MP4, MKV, AVI, MOV, WEBM...
 • Photos & documents (sent as files)
-
-How to use me:
-• Personal media host (movies, series, documentaries)
-• Share large videos without Telegram compression
-• Build your private streaming library
-• Stream directly in browser from any device
-• Access your files anywhere, anytime
 
 Just send me a file — magic happens instantly!
 Support: @Wavetouch_bot`
@@ -260,7 +235,7 @@ func (b *TelegramBot) handleSMSCommand(ctx *ext.Context, u *ext.Update) error {
 
 	users, err := b.getAllUsers()
 	if err != nil {
-		return b.sendReply(ctx, u, "Error loading users from database.")
+		return b.sendReply(ctx, u, "Error loading users.")
 	}
 
 	sent := 0
@@ -307,7 +282,7 @@ func (b *TelegramBot) handleBanUser(ctx *ext.Context, u *ext.Update) error {
 
 	_ = b.setAuthorized(targetID, false)
 	b.sendReply(ctx, u, fmt.Sprintf("User %d has been banned.\nReason: %s", targetID, reason))
-	logToChannel(fmt.Sprintf("Admin banned user %d – Reason: %s", targetID, reason))
+	logToChannel(fmt.Sprintf("Admin banned user %d – %s", targetID, reason))
 	return nil
 }
 
@@ -346,13 +321,11 @@ func (b *TelegramBot) handleListUsers(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
-	users, err := b.getAllUsers()
-	if err != nil {
-		return b.sendReply(ctx, u, "Error loading users.")
-	}
-
-	total := len(users)
+	total, _ := b.getUserCount()
 	offset := (page - 1) * pageSize
+	users, _ := b.getAllUsers()
+
+	// Paginación simple
 	end := offset + pageSize
 	if end > total {
 		end = total
@@ -409,6 +382,7 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	}
 	admin := "No"
 	if info.IsAdmin {
+	{
 		admin = "Yes"
 	}
 	username := "N/A"
@@ -457,6 +431,8 @@ func (b *TelegramBot) handleMediaMessages(ctx *ext.Context, u *ext.Update) error
 
 func (b *TelegramBot) handleAnyUpdate(*ext.Context, *ext.Update) error { return nil }
 
+// ==================== SINCRONIZACIÓN Y UTILIDADES ====================
+
 func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL string, file *types.DocumentFile) error {
 	proxied := b.wrapWithProxyIfNeeded(fileURL)
 
@@ -468,7 +444,7 @@ func (b *TelegramBot) sendMediaToUser(ctx *ext.Context, u *ext.Update, fileURL s
 
 	_, err := ctx.Reply(u, ext.ReplyTextString(proxied), &ext.ReplyOpts{Markup: &keyboard})
 	if err != nil {
-		b.logger.Printf("Failed to send streaming link: %v", err)
+		b.logger.Printf("Failed to send link: %v", err)
 	}
 
 	wsMsg := b.constructWebSocketMessage(proxied, file)
@@ -522,4 +498,103 @@ func logToChannel(text string) {
 			Message: "[BOT LOG] " + text,
 		})
 	}()
+}
+
+// ==================== SINCRONIZACIÓN DB ====================
+
+func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
+	if u.EffectiveUser().ID != permanentAdminID {
+		return b.sendReply(ctx, u, "Solo el admin principal puede usar /syncdb")
+	}
+
+	users, err := b.getAllUsers()
+	if err != nil {
+		return b.sendReply(ctx, u, "Error leyendo DB")
+	}
+
+	jsonData, _ := json.MarshalIndent(users, "", "  ")
+	dataStr := string(jsonData)
+
+	const maxLen = 4000
+	var parts []string
+	for i := 0; i < len(dataStr); i += maxLen {
+		end := i + maxLen
+		if end > len(dataStr) {
+			end = len(dataStr)
+		}
+		parts = append(parts, dataStr[i:end])
+	}
+
+	for i, part := range parts {
+		header := fmt.Sprintf("=== DB SYNC PART %d/%d ===\n\n", i+1, len(parts))
+		message := header + "```json\n" + part + "\n```"
+
+		resp, err := b.tgClient.API().MessagesSendMessage(b.tgCtx, &tg.MessagesSendMessageRequest{
+			Peer:    &tg.InputPeerChannel{ChannelID: -logChannelID},
+			Message: message,
+		})
+		if err != nil {
+			continue
+		}
+
+		// Extraer ID del mensaje
+		update := resp.(*tg.Updates)
+		var msgID int
+		for _, upd := range update.Updates {
+			if um, ok := upd.(*tg.UpdateNewChannelMessage); ok {
+				if m, ok := um.Message.(*tg.Message); ok {
+					msgID = m.ID
+					break
+				}
+			}
+		}
+
+		// Fijar
+		b.tgClient.API().ChannelsUpdatePinnedMessage(b.tgCtx, &tg.ChannelsUpdatePinnedMessageRequest{
+			Channel: &tg.InputChannel{ChannelID: -logChannelID},
+			ID:      msgID,
+			Pinned:  true,
+		})
+	}
+
+	b.sendReply(ctx, u, fmt.Sprintf("Base de datos sincronizada en %d mensajes fijados", len(parts)))
+	return nil
+}
+
+func (b *TelegramBot) handleEditedPinnedMessage(ctx *ext.Context, u *ext.Update) error {
+	if u.EffectiveChat().GetID() != -logChannelID {
+		return nil
+	}
+	if !u.EffectiveMessage.Message.Pinned {
+		return nil
+	}
+
+	text := u.EffectiveMessage.Message.Message
+	if !strings.Contains(text, "=== DB SYNC PART") {
+		return nil
+	}
+
+	start := strings.Index(text, "```json")
+	if start == -1 {
+		return nil
+	}
+	start += len("```json")
+	end := strings.LastIndex(text, "```")
+	if end == -1 {
+		return nil
+	}
+	jsonStr := text[start:end]
+
+	var users []UserInfo
+	if err := json.Unmarshal([]byte(jsonStr), &users); err != nil {
+		logToChannel("Error parsing edited JSON dump")
+		return nil
+	}
+
+	for _, usr := range users {
+		_ = b.storeUserInfo(usr.UserID, usr.ChatID, usr.FirstName, usr.LastName, usr.Username, usr.IsAuthorized, usr.IsAdmin)
+	}
+
+	logToChannel("DB actualizada desde mensaje fijado editado")
+	return nil
 }
