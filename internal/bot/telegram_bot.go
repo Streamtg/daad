@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3" // Driver SQLite
+	_ "github.com/mattn/go-sqlite3"
 
 	"webBridgeBot/internal/config"
 	"webBridgeBot/internal/logger"
@@ -18,6 +18,7 @@ import (
 	"webBridgeBot/internal/web"
 
 	"github.com/celestix/gotgproto"
+	"github.com/celestix/gotgproto/dispatcher"
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/dispatcher/handlers/filters"
 	"github.com/celestix/gotgproto/ext"
@@ -129,7 +130,8 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
 	d.AddHandler(handlers.NewCommand("sms", b.handleSMSCommand))
 	d.AddHandler(handlers.NewCommand("syncdb", b.handleSyncDB))
-	d.AddHandler(handlers.NewEditedMessage(filters.Message.InChannels, b.handleEditedPinnedMessage)) // Corregido
+	// Escucha ediciones en mensajes (incluye canales si el bot es admin)
+	d.AddHandler(handlers.NewEditedMessage(nil, b.handleEditedPinnedMessage))
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 }
@@ -197,7 +199,7 @@ func (b *TelegramBot) getUserCount() (int, error) {
 	return count, err
 }
 
-// ==================== HANDLERS COMPLETOS ====================
+// ==================== HANDLERS ====================
 
 func (b *TelegramBot) handleStartCommand(ctx *ext.Context, u *ext.Update) error {
 	user := u.EffectiveUser()
@@ -379,7 +381,7 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	}
 	admin := "No"
 	if info.IsAdmin {
-		admin = "Yes" // Corregido el bloque extra
+		admin = "Yes"
 	}
 	username := "N/A"
 	if info.Username != "" {
@@ -542,10 +544,11 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 			}
 		}
 
-		_, err = b.tgClient.API().ChannelsUpdatePinnedMessage(b.tgCtx, &tg.ChannelsUpdatePinnedMessageRequest{
-			Channel: &tg.InputChannel{ChannelID: -logChannelID},
-			ID:      msgID,
-			Pinned:  true,
+		// MÉTODO CORRECTO PARA FIJAR EN CANAL
+		_, err = b.tgClient.API().MessagesUpdatePinnedMessage(b.tgCtx, &tg.MessagesUpdatePinnedMessageRequest{
+			Peer:   &tg.InputPeerChannel{ChannelID: -logChannelID},
+			ID:     msgID,
+			Pinned: true,
 		})
 		if err != nil {
 			b.logger.Printf("Error pinning message: %v", err)
@@ -556,15 +559,14 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 	return nil
 }
 
+// Escucha ediciones en cualquier mensaje (incluye canales)
 func (b *TelegramBot) handleEditedPinnedMessage(ctx *ext.Context, u *ext.Update) error {
-	if u.EffectiveChat().GetID() != -logChannelID {
-		return nil
-	}
-	if u.EffectiveMessage.Message == nil || !u.EffectiveMessage.Message.Pinned {
+	msg := u.EffectiveMessage.Message
+	if msg == nil || !msg.Pinned || u.EffectiveChat().GetID() != -logChannelID {
 		return nil
 	}
 
-	text := u.EffectiveMessage.Message.Message
+	text := msg.Message
 	if !strings.Contains(text, "=== DB SYNC PART") {
 		return nil
 	}
