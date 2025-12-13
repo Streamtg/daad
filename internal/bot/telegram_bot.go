@@ -2,7 +2,6 @@ package bot
 
 import (
 	"database/sql"
-	"fmt"
 	"net/url"
 	"os"
 	"strconv"
