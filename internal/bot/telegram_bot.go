@@ -21,7 +21,6 @@ import (
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/dispatcher/handlers/filters"
 	"github.com/celestix/gotgproto/ext"
-	"github.com/celestix/gotgproto/sessionMaker"
 	"github.com/gotd/td/tg"
 	"github.com/joho/godotenv"
 )
@@ -86,14 +85,14 @@ func NewTelegramBot(cfg *config.Configuration, log *logger.Logger) (*TelegramBot
 
 	log.Println("Connected to local SQLite database")
 
-	// Cliente Telegram – FORMA CORRECTA Y DEFINITIVA (sin panic)
+	// Cliente Telegram – SESIÓN EN MEMORIA (se crea automáticamente si no existe)
 	client, err := gotgproto.NewClient(
 		cfg.ApiID,
 		cfg.ApiHash,
 		gotgproto.ClientTypeBot(cfg.BotToken),
-		gotgproto.ClientOpts{
-			Session:          sessionMaker.MemorySession(), // ← Aquí va la sesión en memoria
+		&gotgproto.ClientOpts{
 			DisableCopyright: true,
+			// gotgproto crea automáticamente la sesión en memoria para bots si no se especifica nada
 		},
 	)
 	if err != nil {
