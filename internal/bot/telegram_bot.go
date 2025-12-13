@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -130,7 +129,7 @@ func (b *TelegramBot) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("userinfo", b.handleUserInfo))
 	d.AddHandler(handlers.NewCommand("sms", b.handleSMSCommand))
 	d.AddHandler(handlers.NewCommand("syncdb", b.handleSyncDB))
-	d.AddHandler(handlers.NewEditedChannelPost(nil, b.handleEditedPinnedMessage))
+	d.AddHandler(handlers.NewEditedMessage(filters.Message.InChannels, b.handleEditedPinnedMessage)) // Corregido: ediciones en canales
 	d.AddHandler(handlers.NewMessage(filters.Message.Media, b.handleMediaMessages))
 	d.AddHandler(handlers.NewAnyUpdate(b.handleAnyUpdate))
 }
@@ -380,7 +379,7 @@ func (b *TelegramBot) handleUserInfo(ctx *ext.Context, u *ext.Update) error {
 	}
 	admin := "No"
 	if info.IsAdmin {
-		admin = "Yes" // <-- CORREGIDO: eliminado el bloque extra
+		admin = "Yes"
 	}
 	username := "N/A"
 	if info.Username != "" {
@@ -543,11 +542,15 @@ func (b *TelegramBot) handleSyncDB(ctx *ext.Context, u *ext.Update) error {
 			}
 		}
 
-		b.tgClient.API().ChannelsUpdatePinnedMessage(b.tgCtx, &tg.ChannelsUpdatePinnedMessageRequest{
+		// Método correcto para fijar mensaje en canal
+		_, err = b.tgClient.API().ChannelsUpdatePinnedMessage(b.tgCtx, &tg.ChannelsUpdatePinnedMessageRequest{
 			Channel: &tg.InputChannel{ChannelID: -logChannelID},
 			ID:      msgID,
 			Pinned:  true,
 		})
+		if err != nil {
+			b.logger.Printf("Error pinning message: %v", err)
+		}
 	}
 
 	b.sendReply(ctx, u, fmt.Sprintf("Base de datos sincronizada en %d mensajes fijados", len(parts)))
@@ -558,7 +561,7 @@ func (b *TelegramBot) handleEditedPinnedMessage(ctx *ext.Context, u *ext.Update)
 	if u.EffectiveChat().GetID() != -logChannelID {
 		return nil
 	}
-	if !u.EffectiveMessage.Message.Pinned {
+	if u.EffectiveMessage.Message == nil || !u.EffectiveMessage.Message.Pinned {
 		return nil
 	}
 
